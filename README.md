@@ -136,6 +136,7 @@ discovered → installed → enabled → active → verified
 | POST | `/dsh-plugin-manager/install?spec=` | 异步安装，返回 jobId |
 | GET | `/dsh-plugin-manager/check-update?package=` | 联网检查是否有新版本 |
 | POST | `/dsh-plugin-manager/update?package=` | 异步更新事务，返回 jobId |
+| POST | `/dsh-plugin-manager/restart` | 触发 Harness 重启（不可用时降级为提示） |
 | GET | `/dsh-plugin-manager/install?jobId=` | 轮询安装/卸载/更新进度（通用 job 查询） |
 | POST | `/dsh-plugin-manager/uninstall?package=&confirm=true` | 卸载事务 |
 | GET | `/dsh-plugin-manager/market` | 发现市场候选列表 |
@@ -193,6 +194,17 @@ discovered → installed → enabled → active → verified
 - **官方核心受保护**：`@deepseek-ai/*` 不能通过本接口更新，用 dsh 自身的升级流程
 - **返回版本变化**：`{ version: { before, after } }`，让用户看到实际从哪个版本升到哪个版本
 - **异步 job**：和 install/uninstall 一样走 `startUpdate`，前端轮询进度
+
+### 重启选项
+
+install / update / uninstall 成功后，变更需重启 Harness 才完全生效。插件管理器不能直接杀掉宿主进程，设计为：
+
+- **重启横幅**：任务成功后顶部出现持久横幅（非 3 秒 toast），带三个选项：
+  - **现在重启**：调用 `POST /dsh-plugin-manager/restart`，尝试 `dsh --restart`
+  - **以后自动重启**：记忆偏好到 localStorage，下次任务成功后自动调重启接口
+  - **稍后手动**：关闭横幅，用户自行重启
+- **自动重启不可用时降级**：dsh 版本不支持 `--restart` 时返回 `available: false`，前端提示用户手动重启
+- **更新管理器自身**：横幅变橙色醒目提示"重启期间本设置页会短暂中断"
 
 ## 相关项目
 

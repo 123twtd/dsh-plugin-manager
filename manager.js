@@ -608,13 +608,15 @@ export async function checkUpdate(profile, packageName) {
 
 // 更新事务：快照 → pnpm update → dump-config 校验 → 分层验证 → 失败回滚。
 // 复用 install 的事务结构，但保留 bundles/patch/pins/market 状态不动（这些是用户配置，update 只换代码）。
-// 官方核心组件受保护，不能通过本接口更新（用 dsh 自身的升级流程）。
+// 官方核心组件（@deepseek-ai/*）受保护，不能通过本接口更新（用 dsh 自身的升级流程）。
+// 插件管理器自身可以更新（否则无法修 bug），但返回 isManager: true 让前端给更醒目的重启提示。
 export async function updatePlugin(profile, packageName, { onStep } = {}) {
   const dir = profileDir(profile);
   const target = (await inspectProfile(dir)).entries.find((entry) => entry.packageName === packageName);
   if (!target) throw new Error(`${packageName} 不在当前 Profile 的 bundles 里。`);
   if (!target.installed) throw new Error(`${packageName} 未安装，无法更新。`);
   if (isCore(target)) throw new Error('官方核心组件受保护，请通过 dsh 自身的升级流程更新。');
+  const isManager = packageName === managerPackageName;
   const pnpm = await detectPnpm();
   onStep?.({ label: `解析包管理器（${pnpm.label} ${pnpm.version}）` });
   const packagePath = join(dir, 'package.json'), lockPath = join(dir, 'pnpm-lock.yaml');
@@ -645,7 +647,7 @@ export async function updatePlugin(profile, packageName, { onStep } = {}) {
   }
   const verification = await verifyProfile(profile, dir).catch(() => ({ verified: false, level: 'syntax', checked: 0, issues: [], error: '验证执行异常' }));
   const afterPkg = await json(join(dir, 'node_modules', packageName, 'package.json'), {});
-  return { ok: true, packageName, version: { before: target.version, after: afterPkg.version }, restartRequired: true, snapshotDir, verification };
+  return { ok: true, packageName, isManager, version: { before: target.version, after: afterPkg.version }, restartRequired: true, snapshotDir, verification };
 }
 
 // 卸载事务：先禁用并校验，确认不会拖垮 Profile，再真正 pnpm remove。
@@ -778,6 +780,15 @@ export function apply(ctx) { ctx.inject?.(['webServer'], ({ webServer }) => webS
   if (req.method === 'POST' && url.pathname === '/dsh-plugin-manager/uninstall') { const pkg = url.searchParams.get('package'); if (!pkg) return send(res, 400, { ok: false, error: '缺少 package。' }); if (url.searchParams.get('confirm') !== 'true') return send(res, 400, { ok: false, error: '卸载是破坏性操作，必须带 confirm=true。' }); const job = startUninstall(profile, dir, pkg, { unpin: url.searchParams.get('unpin') === 'true', confirm: true }); return send(res, 200, { ok: true, jobId: job.id }); }
   if (req.method === 'GET' && url.pathname === '/dsh-plugin-manager/check-update') { const pkg = url.searchParams.get('package'); if (!pkg) return send(res, 400, { ok: false, error: '缺少 package。' }); return send(res, 200, { ok: true, ...(await checkUpdate(profile, pkg)) }); }
   if (req.method === 'POST' && url.pathname === '/dsh-plugin-manager/update') { const pkg = url.searchParams.get('package'); if (!pkg) return send(res, 400, { ok: false, error: '缺少 package。' }); const job = startUpdate(profile, dir, pkg); return send(res, 200, { ok: true, jobId: job.id }); }
+  if (req.method === 'POST' && url.pathname === '/dsh-plugin-manager/restart') {
+    // 尝试触发 dsh 重启。dsh 可能支持 --restart 或通过信号；不支持的版本会返回 available: false。
+    // 保守策略：先尝试 spawn dsh --restart，成功则返回 ok，失败则降级为提示用户手动重启。
+    try {
+      const bin = process.platform === 'win32' ? 'dsh.cmd' : 'dsh';
+      await exec(bin, ['--restart'], { timeout: 10_000, shell: process.platform === 'win32' }).catch(() => { throw new Error('dsh --restart 不可用'); });
+      return send(res, 200, { ok: true, restarted: true });
+    } catch (error) { return send(res, 200, { ok: true, restarted: false, available: false, hint: '当前 dsh 版本不支持自动重启，请手动重启 Harness。' }); }
+  }
   if (req.method === 'GET' && url.pathname === '/dsh-plugin-manager/install' || req.method === 'GET' && url.pathname === '/dsh-plugin-manager/uninstall' || req.method === 'GET' && url.pathname === '/dsh-plugin-manager/update') { const job = await getJob(dir, url.searchParams.get('jobId')); if (!job) return send(res, 404, { ok: false, error: '任务不存在或已过期。' }); return send(res, 200, { ok: true, job }); }
   return send(res, 404, { ok: false, error: '未知接口。' });
 } catch (error) { return send(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) }); } } })); }

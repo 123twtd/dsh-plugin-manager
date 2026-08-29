@@ -57,6 +57,11 @@ window.__ModuleLoader__.load({
       @container dshpm (max-width:720px){.dshpm{padding:16px}.dshpm-top{align-items:flex-start;flex-direction:column}.dshpm-counts{justify-content:flex-start}.dshpm-head{display:none}.dshpm-row,.dshpm-table.market .dshpm-row{grid-template-columns:minmax(0,1fr) auto;gap:6px 10px;min-height:0;padding:10px}.dshpm-name{grid-column:1/-1}.dshpm-category{grid-column:1;grid-row:2}.dshpm-source{grid-column:1;grid-row:3}.dshpm-state{grid-column:2;grid-row:2;text-align:right}.dshpm-actions{grid-column:2;grid-row:3;flex-wrap:nowrap;justify-content:flex-end}.dshpm-tools{gap:6px}.dshpm-detail-grid{grid-template-columns:88px minmax(0,1fr)}}
       @container dshpm (max-width:520px){.dshpm-action-label{display:none}.dshpm-actions{gap:4px}}
       @container dshpm (min-width:521px){.dshpm-tab .dshpm-action-label{display:none}}
+      .dshpm-restart-banner{margin:0 0 14px;padding:12px 14px;border-radius:9px;font-size:13px;line-height:1.6;border:1px solid transparent;background:color-mix(in srgb,#2563eb 10%,transparent);border-color:color-mix(in srgb,#2563eb 35%,transparent);color:#1e40af;display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between}
+      .dshpm-restart-banner.danger{background:color-mix(in srgb,#d97706 12%,transparent);border-color:color-mix(in srgb,#d97706 40%,transparent);color:#92400e}
+      .dshpm-restart-banner b{font-weight:600}
+      .dshpm-restart-actions{display:flex;gap:8px;flex-wrap:wrap}
+      .dshpm-restart-actions .dshpm-button{white-space:nowrap}
     `;
     const readBody = async (response) => {
       const body = await response.json().catch(() => ({}));
@@ -96,6 +101,8 @@ window.__ModuleLoader__.load({
       const [manualNote, setManualNote] = React.useState('');
       const [marketToolsOpen, setMarketToolsOpen] = React.useState(false);
       const [updateInfo, setUpdateInfo] = React.useState({});  // { [packageName]: { loading, hasUpdate, latest, current, error } }
+      const [restartPrompt, setRestartPrompt] = React.useState(null);  // { kind: 'install'|'update'|'uninstall', label, isManager } 或 null
+      const [restartPref] = React.useState(() => { try { return localStorage.getItem('dshpm-restart-pref') || ''; } catch { return ''; } });  // 'auto' | 'manual' | ''
       const confirmRef = React.useRef(null);
       const guardRef = React.useRef(null);
       const timerRef = React.useRef(null);
@@ -166,6 +173,13 @@ window.__ModuleLoader__.load({
           if (kind === 'install') { const v = job.result?.verification; setNotice({ kind: v?.verified === false ? 'info' : 'ok', text:`已安装并启用 ${job.result?.packageName ?? label}${v?.verified === false ? `（验证发现 ${v.issues.length} 个问题）` : ''}。重启 Harness 后完全生效。` }); }
           else if (kind === 'update') { const v = job.result?.verification; const ver = job.result?.version; setNotice({ kind: v?.verified === false ? 'info' : 'ok', text:`已更新 ${label}${ver ? `（${ver.before ?? '?'} → ${ver.after ?? '?'}）` : ''}${v?.verified === false ? `（验证发现 ${v.issues.length} 个问题）` : ''}。重启 Harness 后完全生效。` }); }
           else { const v = job.result?.verification; setNotice({ kind: v?.verified === false ? 'info' : 'ok', text:`已彻底卸载 ${label}${job.result?.market?.returned ? '，并已退回发现市场' : ''}${v?.verified === false ? `（验证发现 ${v.issues.length} 个问题）` : ''}。重启 Harness 后完全生效。` }); }
+          // 任务成功后触发重启提示横幅。更新管理器自身时标记 isManager，前端给更醒目的提示。
+          // 偏好为 auto 时直接调重启接口，不弹横幅。
+          if (job.result?.restartRequired !== false) {
+            const isManager = kind === 'update' && job.result?.isManager;
+            if (restartPref === 'auto') { doRestart(); }
+            else { setRestartPrompt({ kind, label, isManager }); }
+          }
         } catch (error) {
           setNotice({ kind:'error', text:`${kind === 'install' ? '安装' : kind === 'update' ? '更新' : '卸载'} ${label} 失败：${error instanceof Error ? error.message : String(error)}` });
         } finally {
@@ -178,7 +192,7 @@ window.__ModuleLoader__.load({
             return current;
           });
         }
-      }, [reload, reloadMarket]);
+      }, [reload, reloadMarket, restartPref, doRestart]);
       const requestToggle = React.useCallback(async (entry) => {
         if (!entry.enabled || !entry.pinned) return toggle(entry);
         if (await askGuard({ entry, action:'disable' })) return toggle(entry, true);
@@ -192,6 +206,11 @@ window.__ModuleLoader__.load({
       const requestUpdate = React.useCallback(async (entry) => {
         await runTask('update', `/dsh-plugin-manager/update?package=${encodeURIComponent(entry.packageName)}`, entry.packageName);
       }, [runTask]);
+      const doRestart = React.useCallback(async () => {
+        try { const body = await fetch('/dsh-plugin-manager/restart', { method:'POST' }).then(readBody); setRestartPrompt(null); setNotice({ kind: body.restarted ? 'ok' : 'info', text: body.restarted ? '已触发 Harness 重启，页面会自动重连。' : (body.hint || '自动重启不可用，请手动重启 Harness。') }); }
+        catch (error) { setNotice({ kind:'error', text:`重启请求失败：${error instanceof Error ? error.message : String(error)}` }); }
+      }, []);
+      const dismissRestart = React.useCallback(() => setRestartPrompt(null), []);
       const install = React.useCallback(async (candidate) => {
         await runTask('install', `/dsh-plugin-manager/install?spec=${encodeURIComponent(candidate.spec)}`, candidate.repoName);
       }, [runTask]);
@@ -355,6 +374,14 @@ window.__ModuleLoader__.load({
           ['全部','已启用','未启用'].map((item) => jsx('button', { className:status === item ? 'dshpm-chip active' : 'dshpm-chip', type:'button', onClick:() => setStatus(item), children:item }, item))
         ] }),
         notice ? jsx('p', { className:`dshpm-notice ${notice.kind}`, role:'status', children:notice.text }) : null,
+        restartPrompt ? jsxs('div', { className:`dshpm-restart-banner${restartPrompt.isManager ? ' danger' : ''}`, role:'status', children:[
+          jsxs('span', { children:[restartPrompt.isManager ? jsx('b', { children:'更新了插件管理器自身。' }) : null, restartPrompt.kind === 'install' ? '安装完成，' : restartPrompt.kind === 'update' ? '更新完成，' : '卸载完成，', '重启 Harness 后变更才完全生效。', restartPrompt.isManager ? ' 重启期间本设置页会短暂中断。' : ''] }),
+          jsxs('div', { className:'dshpm-restart-actions', children:[
+            jsx('button', { className:'dshpm-button primary', type:'button', onClick:doRestart, children:'现在重启' }),
+            jsx('button', { className:'dshpm-button', type:'button', onClick:() => { try { localStorage.setItem('dshpm-restart-pref', 'auto'); } catch {} dismissRestart(); }, children:'以后自动重启' }),
+            jsx('button', { className:'dshpm-button', type:'button', onClick:dismissRestart, children:'稍后手动' })
+          ] })
+        ] }) : null,
         state.error ? jsx('p', { className:'dshpm-notice error', role:'alert', children:state.error }) : null,
         state.loading ? jsx('p', { className:'dshpm-sub', children:'正在读取当前 Profile…' }) : null,
         manager ? jsxs('section', { className:'dshpm-section', children:[jsx('h3', { className:'dshpm-section-title', children:'固定管理器' }), table([manager], true)] }) : null,

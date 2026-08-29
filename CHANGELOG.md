@@ -7,9 +7,10 @@
 ### 新增
 
 - **检查更新 `checkUpdate`**：联网查询已装插件是否有新版本。npm 包走 `registry.npmjs.org` 的 dist-tags；github 包走 GitHub API 的 latest release 或最新 tag。离线/网络异常时返回降级提示而非抛错
-- **更新事务 `updatePlugin`**：复用 install 的事务结构（快照 → pnpm update → dump-config → 分层验证 → 失败回滚）。保留用户配置（bundles/patch/pins/market）不动，只换代码。官方核心组件受保护不可更新
+- **更新事务 `updatePlugin`**：复用 install 的事务结构（快照 → pnpm update → dump-config → 分层验证 → 失败回滚）。保留用户配置（bundles/patch/pins/market）不动，只换代码。官方核心组件受保护不可更新。插件管理器自身可更新（返回 `isManager` 标记）
 - **`startUpdate`**：异步 job，前端轮询进度，和 install/uninstall 一致
-- **HTTP 接口**：`GET /dsh-plugin-manager/check-update?package=` + `POST /dsh-plugin-manager/update?package=`，通用 job 查询合并 install/uninstall/update
+- **HTTP 接口**：`GET /dsh-plugin-manager/check-update?package=` + `POST /dsh-plugin-manager/update?package=` + `POST /dsh-plugin-manager/restart`，通用 job 查询合并 install/uninstall/update
+- **重启横幅**：install/update/uninstall 成功后顶部持久横幅，三选项：现在重启 / 以后自动重启（localStorage 记忆）/ 稍后手动。dsh 不支持 `--restart` 时降级提示。更新管理器自身时横幅变橙色
 - **UI 检查更新按钮**：每个已装插件卡片新增「检」按钮，一键联网查询；有更新时显示版本变化（`v1.0.0 → v1.1.0`）和「升」按钮，走异步进度
 - **5 个新测试**：checkUpdate 缺失包/无版本号/npm registry 查询、updatePlugin 拒绝核心组件/拒绝缺失包
 
