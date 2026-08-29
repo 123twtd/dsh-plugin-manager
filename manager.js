@@ -574,6 +574,11 @@ export async function checkUpdate(profile, packageName) {
   if (!target) throw new Error(`${packageName} 不在当前 Profile 的 bundles 里。`);
   const current = target.version;
   if (!current) return { packageName, hasUpdate: false, current: null, latest: null, source: target.specifier, error: '当前未记录版本号，无法比较。' };
+  // 本地自建包 / 官方核心组件 不走联网查询——它们没有公开的 registry 发布渠道。
+  // plugin-manager 自身（source: local）和 @deepseek-ai/*（source: official）都属于此类。
+  if (target.protected || target.source === 'local' || isCore(target)) {
+    return { packageName, hasUpdate: false, current, latest: null, source: target.specifier, skipped: true, reason: '本地/官方组件不走联网检查' };
+  }
   const spec = target.specifier ?? '';
   // npm 源：查询 registry 的 dist-tags
   if (!spec.startsWith('github:')) {
