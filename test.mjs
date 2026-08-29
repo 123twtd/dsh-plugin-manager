@@ -407,7 +407,7 @@ test('verifyProfile passes syntax layer for valid plugin', async () => {
     assert.equal(result.issues.length, 0, '语法正确不应有问题');
     assert.ok(result.checked >= 1, '至少检查了一个 bundle');
     // level 可能是 syntax（dsh 不可用）或 config/loader（dsh 可用）
-    assert.ok(['syntax', 'config', 'loader'].includes(result.level), `level 应为有效值，实际: ${result.level}`);
+    assert.ok(['syntax', 'patch', 'config', 'loader'].includes(result.level), `level 应为有效值，实际: ${result.level}`);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

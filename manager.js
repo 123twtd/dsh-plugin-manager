@@ -17,6 +17,26 @@ const githubRepo = (repository) => {
   const match = typeof value === 'string' ? value.match(/github\.com[/:]([^/]+\/[^/#]+?)(?:\.git)?(?:[#?].*)?$/i) : undefined;
   return match?.[1];
 };
+// 动态加载 js-yaml。plugin-manager 自身没装这个依赖，但 dsh 一定带了。
+// 尝试顺序：本地 node_modules → dsh 的 node_modules → 放弃（返回 null 让调用方跳过）。
+let _yamlModule = null;
+async function loadYaml() {
+  if (_yamlModule) return _yamlModule;
+  const candidates = [
+    join(process.cwd(), 'node_modules', 'js-yaml'),
+    ...(process.env.APPDATA ? [join(process.env.APPDATA, 'npm', 'node_modules', '@deepseek-ai', 'dsh', 'node_modules', 'js-yaml')] : []),
+    ...(process.env.LOCALAPPDATA ? [join(process.env.LOCALAPPDATA, 'npm', 'node_modules', '@deepseek-ai', 'dsh', 'node_modules', 'js-yaml')] : []),
+  ];
+  for (const candidate of candidates) {
+    try { _yamlModule = (await import(candidate)).default || require(candidate); return _yamlModule; } catch { continue; }
+  }
+  return null;
+}
+async function parseYaml(text) {
+  const YAML = await loadYaml();
+  if (!YAML) return null; // 无 js-yaml 可用，返回 null 让调用方跳过（不做 YAML 检查）
+  return YAML.load(text);
+}
 function githubRepoFromSpecifier(specifier) {
   const match = typeof specifier === 'string' ? specifier.match(/^github:([^#]+?)(?:#.*)?$/i) : undefined;
   return match?.[1];
@@ -225,10 +245,28 @@ export async function verifyProfile(profile, dir) {
     catch (error) { issues.push({ packageName: entry.packageName, file: mainFile, level: 'syntax', error: (error.stderr ?? error.message ?? String(error)).slice(0, 200) }); }
   }
   if (issues.length > 0) return { verified: false, level, checked, issues, verifiedAt: null };
-  // 第二层：dump-config 验证配置树合法。dsh 不可用时降级到 syntax 层，不报 issue。
+  // 第二层：检查已装插件的 cordis.patch.yml 是否是合法 YAML 数组。
+  // dsh 加载 bundle overlay patch 时会强制 top-level array，注释-only 或空文件会导致启动崩溃。
+  const YAML = await loadYaml();
+  if (YAML) {
+    for (const entry of inventory.entries) {
+      if (!entry.enabled || !entry.installed) continue;
+      const patchPath = join(dir, 'node_modules', entry.packageName, 'cordis.patch.yml');
+      const patchText = await readFile(patchPath, 'utf8').catch(() => null);
+      if (!patchText) continue; // 没有 patch 文件是合法的
+      let parsed;
+      try { parsed = YAML.load(patchText); } catch (e) { issues.push({ packageName: entry.packageName, file: 'cordis.patch.yml', level: 'patch', error: `YAML 解析失败：${e.message}` }); continue; }
+      if (!Array.isArray(parsed)) {
+        issues.push({ packageName: entry.packageName, file: 'cordis.patch.yml', level: 'patch', error: '必须是 top-level YAML 数组，不能是注释-only 或其他结构' });
+      }
+    }
+  }
+  if (issues.length > 0) return { verified: false, level, checked, issues, verifiedAt: null };
+  level = 'patch';
+  // 第三层：dump-config 验证配置树合法。dsh 不可用时降级到 patch 层，不报 issue。
   try { await dump(profile, dir); level = 'config'; }
   catch (error) { return { verified: false, level, checked, issues, verifiedAt: null, degraded: 'dsh 不可用，仅完成 syntax 层验证' }; }
-  // 第三层：真实 Loader 启动验证。启动 dsh 进程，等待 ready 信号或超时崩溃。
+  // 第四层：真实 Loader 启动验证。启动 dsh 进程，等待 ready 信号或超时崩溃。
   level = await loaderSmokeTest(profile, dir) ? 'loader' : level;
   return { verified: level === 'loader', level, checked, issues, verifiedAt: level === 'loader' ? new Date().toISOString() : null };
 }
