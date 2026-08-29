@@ -21,6 +21,33 @@ function githubRepoFromSpecifier(specifier) {
   const match = typeof specifier === 'string' ? specifier.match(/^github:([^#]+?)(?:#.*)?$/i) : undefined;
   return match?.[1];
 }
+// 从已装包的 node_modules/<pkg>/package.json 读取 repository 字段，提取 GitHub 仓库名。
+async function githubRepoFromEntry(entry) {
+  try {
+    const dir = process.env.DSH_HOME ? join(process.env.DSH_HOME, 'profiles') : join(process.env.USERPROFILE || process.cwd(), '.dsh', 'profiles');
+    // profile 名未知，尝试从 entry.moduleDir 或遍历 profiles 找
+    // 简化方案：直接用 entry 的 repository（inspectProfile 已经从 package.json 里读出来了）
+    if (entry.repository) return githubRepo(entry.repository);
+  } catch {}
+  return null;
+}
+// GitHub API 查询最新 release / tag 的统一逻辑。
+async function githubLatest(packageName, current, source, repo) {
+  try {
+    const headers = { 'Accept': 'application/vnd.github+json', 'User-Agent': 'dsh-plugin-manager' };
+    const release = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, { headers }).then((r) => r.ok ? r.json() : null).catch(() => null);
+    if (release?.tag_name) {
+      const latest = release.tag_name.replace(/^v/, '');
+      return { packageName, hasUpdate: latest && latest !== current, current, latest, source, repo };
+    }
+    const tags = await fetch(`https://api.github.com/repos/${repo}/tags`, { headers }).then((r) => r.ok ? r.json() : null).catch(() => null);
+    const latestTag = Array.isArray(tags) && tags[0]?.name ? tags[0].name.replace(/^v/, '') : null;
+    if (!latestTag) return { packageName, hasUpdate: false, current, latest: null, source, repo, error: '仓库无 release 也无 tag' };
+    return { packageName, hasUpdate: Boolean(latestTag) && latestTag !== current, current, latest: latestTag, source, repo, note: '仓库无 release，取最新 tag' };
+  } catch (error) {
+    return { packageName, hasUpdate: false, current, latest: null, source, repo, error: `GitHub API 异常：${error instanceof Error ? error.message : String(error)}` };
+  }
+}
 function provenanceOf(packageName, pkg, dependencySpecifier) {
   if (packageName.startsWith('@deepseek-ai/')) return { source: 'official', sourceLabel: 'DeepSeek 官方' };
   if (packageName === managerPackageName) return { source: 'local', sourceLabel: '本地自建' };
@@ -574,20 +601,28 @@ export async function checkUpdate(profile, packageName) {
   if (!target) throw new Error(`${packageName} 不在当前 Profile 的 bundles 里。`);
   const current = target.version;
   if (!current) return { packageName, hasUpdate: false, current: null, latest: null, source: target.specifier, error: '当前未记录版本号，无法比较。' };
-  // 本地自建包 / 官方核心组件 不走联网查询——它们没有公开的 registry 发布渠道。
-  // plugin-manager 自身（source: local）和 @deepseek-ai/*（source: official）都属于此类。
-  if (target.protected || target.source === 'local' || isCore(target)) {
-    return { packageName, hasUpdate: false, current, latest: null, source: target.specifier, skipped: true, reason: '本地/官方组件不走联网检查' };
+  // 只有官方核心组件（@deepseek-ai/*）不走联网查询——它们由 dsh 自身的升级流程管理。
+  // 本地自建包（source: local）如果发布到了 GitHub/npm，仍然可以查更新（plugin-manager 就是典型例子）。
+  if (target.source === 'official') {
+    return { packageName, hasUpdate: false, current, latest: null, source: target.specifier, skipped: true, reason: '官方核心组件由 dsh 自身升级流程管理' };
   }
   const spec = target.specifier ?? '';
   // npm 源：查询 registry 的 dist-tags
   if (!spec.startsWith('github:')) {
     try {
       const res = await fetch(`https://registry.npmjs.org/${encodeURIComponent(packageName)}/latest`, { headers: { 'Accept': 'application/json' } });
-      if (!res.ok) return { packageName, hasUpdate: false, current, latest: null, source: spec, error: `registry 返回 ${res.status}` };
-      const data = await res.json();
-      const latest = data.version;
-      return { packageName, hasUpdate: latest && latest !== current, current, latest, source: spec };
+      if (res.ok) {
+        const data = await res.json();
+        const latest = data.version;
+        return { packageName, hasUpdate: latest && latest !== current, current, latest, source: spec };
+      }
+      // registry 查不到（404）：可能是本地自建包，尝试从 package.json 的 repository 字段提取 GitHub 仓库
+      if (res.status === 404) {
+        const repo = await githubRepoFromEntry(target);
+        if (repo) return await githubLatest(packageName, current, spec, repo);
+        return { packageName, hasUpdate: false, current, latest: null, source: spec, error: `registry 无此包（${packageName} 可能是本地开发包），且未找到 GitHub 仓库` };
+      }
+      return { packageName, hasUpdate: false, current, latest: null, source: spec, error: `registry 返回 ${res.status}` };
     } catch (error) {
       return { packageName, hasUpdate: false, current, latest: null, source: spec, error: `网络异常：${error instanceof Error ? error.message : String(error)}` };
     }
@@ -595,20 +630,7 @@ export async function checkUpdate(profile, packageName) {
   // github 源：查 latest release，没有 release 则查最新 tag
   const repo = githubRepoFromSpecifier(spec);
   if (!repo) return { packageName, hasUpdate: false, current, latest: null, source: spec, error: '无法解析 GitHub 仓库地址。' };
-  try {
-    const headers = { 'Accept': 'application/vnd.github+json', 'User-Agent': 'dsh-plugin-manager' };
-    const release = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, { headers }).then((r) => r.ok ? r.json() : null).catch(() => null);
-    if (release?.tag_name) {
-      const latest = release.tag_name.replace(/^v/, '');
-      return { packageName, hasUpdate: latest && latest !== current, current, latest, source: spec };
-    }
-    // 没有 release，查 tags
-    const tags = await fetch(`https://api.github.com/repos/${repo}/tags`, { headers }).then((r) => r.ok ? r.json() : null).catch(() => null);
-    const latestTag = Array.isArray(tags) && tags[0]?.name ? tags[0].name.replace(/^v/, '') : null;
-    return { packageName, hasUpdate: Boolean(latestTag) && latestTag !== current, current, latest: latestTag, source: spec, note: '仓库无 release，取最新 tag' };
-  } catch (error) {
-    return { packageName, hasUpdate: false, current, latest: null, source: spec, error: `GitHub API 异常：${error instanceof Error ? error.message : String(error)}` };
-  }
+  return await githubLatest(packageName, current, spec, repo);
 }
 
 // 更新事务：快照 → pnpm update → dump-config 校验 → 分层验证 → 失败回滚。

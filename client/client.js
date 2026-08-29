@@ -276,7 +276,8 @@ window.__ModuleLoader__.load({
               ? jsxs(React.Fragment, { children:[
                   IconButton({ title:ACTION_COPY.detail, onClick:() => setDetail(entry), children: jsx('span', { children:'详' }) }),
                   jsx('span', { className:'dshpm-protected', children:'受保护' }),
-                  repoUrl ? IconButton({ title:repoTitle(entry), onClick:openExternal(repoUrl), children: jsx(ExternalIcon, {}) }) : null
+                  repoUrl ? IconButton({ title:repoTitle(entry), onClick:openExternal(repoUrl), children: jsx(ExternalIcon, {}) }) : null,
+                  entry.installed ? IconButton({ title: ACTION_COPY.checkUpdate, onClick: () => checkUpdate(entry), disabled: updateInfo[entry.packageName]?.loading, children: updateInfo[entry.packageName]?.loading ? jsx('span', { children:'…' }) : jsx('span', { style:{ color:'#2563eb' }, children:'检' }) }) : null
                 ] })
               : jsxs(React.Fragment, { children:[
                   IconButton({ title:ACTION_COPY.detail, onClick:() => setDetail(entry), children: jsx('span', { children:'详' }) }),
