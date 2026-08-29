@@ -1,0 +1,25 @@
+{
+  "name": "@dsh/plugin-manager",
+  "version": "0.1.0",
+  "description": "Independent DSH plugin inventory and transactional Profile manager.",
+  "type": "module",
+  "main": "./manager.js",
+  "exports": { ".": "./manager.js", "./manager": "./manager.js", "./client": "./client/client.js", "./package.json": "./package.json" },
+  "files": ["manager.js", "client", "cordis.patch.yml", "README.md", "LICENSE"],
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "inject": ["@deepseek-ai/dsh-client-runtime", "@deepseek-ai/dsh-client-ui-settings", "@deepseek-ai/dsh-client-locale"],
+      "platform": "web"
+    }
+  },
+  "dependencies": { "yaml": "^2.6.1" },
+  "engines": { "node": ">=22" },
+  "license": "MIT",
+  "author": "123twtd <1056246995@qq.com>",
+  "homepage": "https://github.com/123twtd/dsh-plugin-manager",
+  "repository": { "type": "git", "url": "https://github.com/123twtd/dsh-plugin-manager.git" },
+  "bugs": { "url": "https://github.com/123twtd/dsh-plugin-manager/issues" },
+  "keywords": ["dsh", "deepseek-harness", "plugin-manager", "profile", "cordis", "transactional", "rollback"],
+  "scripts": { "test": "node --test test.mjs" }
+}
