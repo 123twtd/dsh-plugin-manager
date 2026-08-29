@@ -20,6 +20,6 @@
   "homepage": "https://github.com/123twtd/dsh-plugin-manager",
   "repository": { "type": "git", "url": "https://github.com/123twtd/dsh-plugin-manager.git" },
   "bugs": { "url": "https://github.com/123twtd/dsh-plugin-manager/issues" },
-  "keywords": ["dsh", "deepseek-harness", "plugin-manager", "profile", "cordis", "transactional", "rollback"],
+  "keywords": ["dsh", "deepseek-harness", "dsh-plugin", "plugin-manager", "profile", "cordis", "transactional", "rollback", "smoke-check", "conflict-engine"],
   "scripts": { "test": "node --test test.mjs" }
 }

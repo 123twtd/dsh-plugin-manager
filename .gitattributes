@@ -1,0 +1,9 @@
+# 默认 LF 换行，Windows 签出时转 CRLF
+* text=auto eol=lf
+
+# 二进制文件不做换行转换
+*.png binary
+*.jpg binary
+*.ico binary
+*.zip binary
+*.gz binary
