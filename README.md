@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node](https://img.shields.io/badge/node-%3E%3D22-green.svg)](https://nodejs.org)
-[![Tests](https://img.shields.io/badge/tests-22%20passing-brightgreen.svg)](#测试)
+[![Tests](https://img.shields.io/badge/tests-25%20passing-brightgreen.svg)](#测试)
 [![PRD](https://img.shields.io/badge/PRD-P0--P4%20%2B%20P5-blue.svg)](docs/PLUGIN-MANAGER-PRD.md)
 
 </div>
@@ -41,7 +41,11 @@ dsh-plugin-manager/
 ├── tests/render/           # 渲染数据测试与夹具
 ├── docs/
 │   └── PLUGIN-MANAGER-PRD.md   # 产品需求文档（7 态模型、冲突引擎、事务流程）
-├── LICENSE
+├── .github/                # Issue/PR 模板 + CI workflow
+├── CONTRIBUTING.md         # 贡献指南
+├── CODE_OF_CONDUCT.md      # 行为准则
+├── CHANGELOG.md            # 变更日志
+├── LICENSE                 # MIT
 └── package.json
 ```
 
