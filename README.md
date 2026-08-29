@@ -1,81 +1,220 @@
-# DSH Plugin Manager
+<div align="center">
 
-这是独立于旧 `component-hub` 的 DSH 插件管理器。它不导入旧项目代码，也不把组件市场 UI 当作管理器。
+# @dsh/plugin-manager
 
-当前独立闭环：
+独立于旧 `component-hub` 的 DSH 插件管理器 —— 以 Profile 事务和 Loader 真实验证为核心的插件控制面。
 
-- 读取 Profile bundles，区分官方、社区和未知来源，区分安装/启用状态；
-- 扫描显式冲突、重复 Service Provider、路由、命令、端口冲突、**重复插件 ID**、**缺失 DSH 依赖**、**Node 版本不兼容**；
-- 在 Harness 的“设置 → 插件管理”中读取当前 Profile 的真实清单；
-- 设置页内用 tab 切分「已装的插件」与「发现市场」两个独立栏目，避免市场被淹没在长插件表里；
-- `GET /dsh-plugin-manager/inventory` 与 `GET /dsh-plugin-manager/plan?package=<name>&enabled=true`：供原生设置页调用；
-- `POST /dsh-plugin-manager/toggle?...`：启用/禁用事务；每次写入前创建 Patch 快照，`dump-config` 失败自动恢复；
-- 仅明确的低风险显式冲突可作为自动禁用候选；官方和核心 Service 不会自动关闭。
-- 原生界面在真正切换前用应用内弹窗确认冲突（不依赖 `window.confirm`），成功后给出结果提示；低风险显式冲突才允许自动关闭对方。
-- Patch 一律按 YAML 结构读写（`yaml` 的 AST），不使用正则匹配：`{ id: x, disabled: true }` 这类流样式与手写块样式都能正确识别。
-- 写入使用块状样式；启用一个插件时只摘掉 `disabled` 标记，用户手写的 `config` 等字段会被保留。
-- 改动落在 `cordis.patch.yml`，运行时才合成配置树，因此重启 Harness 后完全生效。
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Node](https://img.shields.io/badge/node-%3E%3D22-green.svg)](https://nodejs.org)
+[![Tests](https://img.shields.io/badge/tests-22%20passing-brightgreen.svg)](#测试)
+[![PRD](https://img.shields.io/badge/PRD-P0--P4%20%2B%20P5-blue.svg)](docs/PLUGIN-MANAGER-PRD.md)
 
-## 发现市场（P5 的第一个子能力）
+</div>
 
-市场只登记候选信息，**不下载任何代码**。当前唯一数据来源是 `dsh-find-plugin` 自带的离线快照
-`node_modules/dsh-find-plugin/data/registry-snapshot.json`，导入后写入
-`~/.dsh/profiles/<profile>/.dsh-plugin-manager/market.json`。
+---
 
-- 候选与已装清单按 **归一化后的 spec** 做 join：`github:Owner/Repo`、`https://github.com/o/r.git`、
-  `github:o/r#ref` 都归一到 `github:o/r`，因此仓库名和包名不一致也能对上。
-- 重复导入按 spec 去重，已有条目的 `note` 与登记时间会保留。
-- 点「安装并启用」才真正拉包，事务顺序：
-  快照 `package.json` 与 `pnpm-lock.yaml` → `pnpm add <spec>` → 写入 `dsh.profile.bundles`
-  → 清掉既往 `disabled` 标记 → `dsh --dump-config` 校验 → 失败则恢复两个文件并 `pnpm remove`。
-- 安装是异步任务：`POST /dsh-plugin-manager/install?spec=` 返回 `jobId`，
-  用 `GET /dsh-plugin-manager/install?jobId=` 轮询，前端每 1.5 秒拉一次并展示步骤。
-  每一步都同时带 `startedAt` 与 `at`，前端由此计算耗时；正在进行中的步骤会被高亮成蓝色脉冲点。
-  安装期间整体进度条会按完成步骤占比推进。
-- **任务持久化**：job 状态落盘到 `~/.dsh/profiles/<profile>/.dsh-plugin-manager/jobs.json`，
-  进程重启后前端轮询不再拿到 404，已完成任务的状态可恢复。
-- pnpm 可能只在 corepack 缓存里，按 `pnpm` → `corepack pnpm` → corepack 缓存中的 `pnpm.cjs` 三级回退解析。
+## 这是什么
 
-- 手动录入：`POST /dsh-plugin-manager/market/add?spec=&note=`，支持只填包名（标为「待补源」，不能一键安装）。
-  AI 也可以直接调这个接口把任意 `github:owner/repo` 加进发现市场，再让用户在面板里一键安装。
-- 候选可随时「舍弃」：`DELETE /dsh-plugin-manager/market?spec=<key>`，按 entry 的 `key` 命中，
-  没有安装源的条目也能删掉；只影响市场记录，不动已安装文件。
-- 行操作内置「在 GitHub 打开」图标，详情弹窗也含可点击的仓库地址，直接新开标签跳转。
+DeepSeek Harness（DSH）是一个以 Profile 为中心、通过 Cordis patch 合成配置树的 Agent 运行时。
+插件以 npm 包形式安装，通过 `dsh.profile.bundles` 声明，由 `cordis.patch.yml` 控制启用/禁用。
 
-接口一览：`GET /market`、`POST /market/import[?replace=true]`、`POST /market/add`、
-`DELETE /market?spec=`、`POST /install?spec=`、`GET /install?jobId=`。
+本插件为 DSH 提供**插件生命周期控制面**：
 
-## 卸载事务
+- **清单**：读取 Profile bundles，区分官方 / 社区 / 未知来源，区分 installed / enabled 状态
+- **冲突引擎**（7 类）：显式声明、重复 Service Provider、路由、命令、端口、重复插件 ID、缺失依赖、Node 版本不兼容
+- **事务**：toggle / install / uninstall 全程快照 → 校验 → 失败回滚，不靠正则匹配 YAML
+- **smoke check**：`node --check` 验证入口文件语法，作为 `verified` 状态证据
+- **任务持久化**：job 状态落盘 `jobs.json`，进程重启后前端轮询不再 404
+- **发现市场**：离线快照 + 手动录入 + 一键安装事务
 
-顺序：置顶检查 → 先禁用并 `dump-config` 校验 → 移出 `bundles` → `pnpm remove` 真正删代码
-→ `dump-config` 校验 → 成功后回流市场；任一步失败则恢复 `package.json` / `cordis.patch.yml` /
-`pnpm-lock.yaml` 并按需重装。
+它独立于旧 `component-hub`，不导入旧项目代码，也不把组件市场 UI 当作管理器。
 
-- **必须先显式确认**：`uninstallPlugin()` 要求 `confirm: true`，HTTP 接口要求 `confirm=true`。
-  卸载会删除代码，不允许被误触或脚本串台触发。
-- **先禁用再删除**：先把插件置为 disabled 并校验配置树，确认不会拖垮 Profile 才真正删除。
-- **自动回流市场**：原本就在市场里的无需写入（已装状态是实时 join 的，依赖消失即变回「未安装」）；
-  原本不在市场里的会用它的 spec 与 package.json 信息补一条候选，标 `source: 'uninstalled'`。
-- 回滚顺序是硬约束：**补偿性的 pnpm 操作会重写甚至删掉 `pnpm-lock.yaml`，所以 lockfile 的恢复必须排在它之后**。
+## 目录结构
 
-接口：`POST /dsh-plugin-manager/uninstall?package=&unpin=&confirm=true`、`GET /dsh-plugin-manager/uninstall?jobId=`。
+```
+dsh-plugin-manager/
+├── manager.js              # 核心管理器：清单、冲突、事务、smoke check、HTTP API
+├── client/
+│   └── client.js           # 设置页 UI：tab 布局、冲突确认、异步进度、响应式
+├── cordis.patch.yml        # 本插件的 patch 声明
+├── test.mjs                # 22 个单元测试
+├── tests/render/           # 渲染数据测试与夹具
+├── docs/
+│   └── PLUGIN-MANAGER-PRD.md   # 产品需求文档（7 态模型、冲突引擎、事务流程）
+├── LICENSE
+└── package.json
+```
 
-## 置顶
+## 快速开始
 
-- 持久化在 `~/.dsh/profiles/<profile>/.dsh-plugin-manager/pins.json`，与 `market.json` 并列。
-- 设置页中置顶项单独显示在「已置顶」分区（独立于「官方」与「其他插件」），
-  并加左侧色条 + 背景色 + 列表紧凑星标，肉眼一眼就能分清。
-- 置顶项不能直接禁用或卸载：前端弹二次确认，说明需先取消置顶；确认后自动取消置顶再继续。
-  后端 `planToggle` 也会返回 `code: 'PINNED'` 兜底拦截。
-- 官方核心组件与插件管理器本体不可置顶、不可卸载。
+### 前置要求
 
-接口：`POST /dsh-plugin-manager/pin?package=&pinned=true|false`。
+- Node.js >= 22
+- DSH（DeepSeek Harness）运行时
+- pnpm（通过 corepack 或独立安装）
 
-暂不支持：联网实时搜索、编辑已有候选的备注、卸载后的磁盘空间回收审计。
+### 安装
 
-## Smoke Check（verified 状态）
+本插件通过 DSH Profile 的 bundles 机制加载，不需要单独全局安装：
 
-`dump-config` 验证配置树合法后，`smokeCheck` 再对每个已启用 bundle 的入口文件执行 `node --check` 语法校验。
-这不是完整 Loader 启动，但能捕获入口文件缺失和语法错误，是 `verified` 状态的证据基础。
-toggle / install / uninstall 的返回值均带 `verification: { verified, checked, issues, verifiedAt }`。
-失败不回滚——插件仍处于 enabled，但 `issues` 会提示用户具体哪个文件出了问题。
+```bash
+# 在 DSH 项目根目录
+pnpm add github:123twtd/dsh-plugin-manager
+# 然后在 package.json 的 dsh.profile.bundles 加入 @dsh/plugin-manager
+```
+
+### 运行测试
+
+```bash
+git clone https://github.com/123twtd/dsh-plugin-manager.git
+cd dsh-plugin-manager
+pnpm install   # 安装 yaml 依赖
+node --test test.mjs
+```
+
+## DSH 插件生态
+
+DSH 插件按来源分四类：
+
+| 来源 | 说明 | 示例 |
+|---|---|---|
+| Official | DeepSeek 官方维护的核心组件 | `@deepseek-ai/dsh-client-runtime`、`@dsh/plugin-manager` |
+| Verified | 官方验证的社区插件 | 待 registry 上线后登记 |
+| Community | 社区开发，spec 归一化后可一键安装 | `github:owner/repo` |
+| Unknown | 已安装但无来源信息 | 仅有 node_modules 记录 |
+
+按架构角色分类：Core Service、Provider、Runtime Plugin、Client Plugin、Full-stack Plugin、Bundle、Workflow、Theme/UI、Skill Pack。
+
+### 插件状态模型
+
+```
+discovered → installed → enabled → active → verified
+                ↓           ↓        ↓
+             failed    quarantined
+```
+
+- **discovered**：已发现（在市场或 node_modules 中）
+- **installed**：依赖已安装到 node_modules
+- **enabled**：已加入 Profile bundles 且未被 patch 禁用
+- **active**：Loader 已成功激活（本版本以 smoke check 为证据基础）
+- **verified**：通过指定等级的真实验证（`node --check` 语法校验）
+- **failed**：安装、配置或启动失败
+- **quarantined**：存在风险或冲突，被隔离
+
+安装不等于启用，启用不等于运行，运行不等于验证通过。
+
+## 核心 API
+
+### HTTP 接口
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/dsh-plugin-manager/inventory` | 当前 Profile 插件清单 + 冲突 |
+| GET | `/dsh-plugin-manager/plan?package=&enabled=` | 预览 toggle 影响 |
+| POST | `/dsh-plugin-manager/toggle?...` | 启用/禁用事务 |
+| POST | `/dsh-plugin-manager/install?spec=` | 异步安装，返回 jobId |
+| GET | `/dsh-plugin-manager/install?jobId=` | 轮询安装进度 |
+| POST | `/dsh-plugin-manager/uninstall?package=&confirm=true` | 卸载事务 |
+| GET | `/dsh-plugin-manager/market` | 发现市场候选列表 |
+| POST | `/dsh-plugin-manager/market/add?spec=&note=` | 手动添加候选 |
+| POST | `/dsh-plugin-manager/pin?package=&pinned=` | 置顶/取消置顶 |
+
+### 事务流程
+
+所有变更操作执行标准事务：
+
+```
+读取状态 → 生成计划 → 展示影响 → 创建快照 → 修改 Profile
+→ dump-config 校验 → smoke check → 成功提交 / 失败回滚
+```
+
+没有完整事务结果不得显示"成功"。
+
+### 冲突引擎（7 类）
+
+| 类型 | kind | 严重度 | 说明 |
+|---|---|---|---|
+| 显式声明 | `explicit` | high | 作者在 `dsh-market.json` 声明 conflicts |
+| 重复 Service | `service` | critical | 同一 Provider 被两个插件 provides |
+| 路由冲突 | `route` | high | 重复 HTTP 路由 |
+| 命令冲突 | `command` | high | 重复命令名 |
+| 端口冲突 | `port` | critical | 重复端口占用 |
+| 重复插件 ID | `duplicate-id` | critical | 两个 bundle 声明同一 insert id |
+| 缺失依赖 | `missing-dependency` | high | 声明的 DSH 依赖未安装 |
+| 版本不兼容 | `version` | high | Node 版本不满足 engines.node |
+
+低风险显式冲突可作为自动禁用候选；官方核心和核心 Service 不会自动关闭。
+
+## 开发指南
+
+### 技术分层
+
+```
+plugin-manager-core    状态模型、Manifest、依赖图、冲突、事务、策略
+plugin-manager-dsh     DSH Bundle、Profile、Loader、dsh plugin 集成
+plugin-manager-ui      列表、详情、计划、冲突、进度、结果
+```
+
+### 如何开发 DSH 插件
+
+1. 创建 npm 包，`package.json` 中声明 `dsh.bundle.patch` 指向你的 `cordis.patch.yml`
+2. 在 `dsh-market.json` 中声明 services / resources / conflicts / dependencies
+3. 用 `pnpm pack` 或发布到 GitHub 后，通过 `spec` 归一化机制安装
+
+```json
+// package.json
+{
+  "name": "my-dsh-plugin",
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" }
+  }
+}
+```
+
+```json
+// dsh-market.json
+{
+  "services": { "provides": ["my-feature"] },
+  "resources": { "commands": ["my-cmd"] },
+  "conflicts": ["other-plugin"],
+  "dependencies": ["@dsh/some-core"]
+}
+```
+
+## 测试
+
+22 个测试覆盖：
+
+- 17 个原有测试：清单读取、状态判断、冲突检测、事务回滚、monorepo 降级、市场归一化
+- 5 个新增测试：重复插件 ID、缺失依赖、版本不兼容、job 持久化恢复、smoke check
+
+```bash
+node --test test.mjs
+```
+
+## 开发阶段
+
+| 阶段 | 状态 | 门禁 |
+|---|---|---|
+| P0 契约冻结 | ✅ | 状态模型、Manifest、错误码定义完成 |
+| P1 只读清单 | ✅ | 准确区分 installed / enabled |
+| P2 冲突计划 | ✅ | 7 类冲突夹具测试通过 |
+| P3 事务变更 | ✅ | 启动失败、回滚失败均有测试证据 |
+| P4 最小 UI | ✅ | 列表 + 详情 + 计划 + 冲突确认 |
+| P5 发现市场 | ✅ 首子能力 | 离线快照 + 一键安装 |
+
+## 贡献
+
+欢迎提交 Issue 和 Pull Request。请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+## 行为准则
+
+本项目遵循 [Contributor Covenant](CODE_OF_CONDUCT.md) 行为准则。
+
+## 变更日志
+
+详见 [CHANGELOG.md](CHANGELOG.md)。
+
+## 许可证
+
+[MIT](LICENSE) © 2026 123twtd

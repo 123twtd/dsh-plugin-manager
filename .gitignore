@@ -14,6 +14,10 @@ desktop.ini
 tmp/
 dev/
 
+# 渲染测试截图（CI/本地跑 render-data-test.mjs 自动生成）
+tests/render/shot-*.png
+tests/render/preview.html
+
 # 编辑器
 .vscode/
 .idea/
