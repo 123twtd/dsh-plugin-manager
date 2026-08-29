@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node](https://img.shields.io/badge/node-%3E%3D22-green.svg)](https://nodejs.org)
-[![Tests](https://img.shields.io/badge/tests-25%20passing-brightgreen.svg)](#测试)
+[![Tests](https://img.shields.io/badge/tests-30%20passing-brightgreen.svg)](#测试)
 [![PRD](https://img.shields.io/badge/PRD-P0--P4%20%2B%20P5-blue.svg)](docs/PLUGIN-MANAGER-PRD.md)
 
 </div>
@@ -37,7 +37,7 @@ dsh-plugin-manager/
 ├── client/
 │   └── client.js           # 设置页 UI：tab 布局、冲突确认、异步进度、响应式
 ├── cordis.patch.yml        # 本插件的 patch 声明
-├── test.mjs                # 25 个测试（单元 + 分层验证 + E2E）
+├── test.mjs                # 30 个测试（单元 + 分层验证 + E2E + 更新）
 ├── tests/render/           # 渲染数据测试与夹具
 ├── docs/
 │   └── PLUGIN-MANAGER-PRD.md   # 产品需求文档（7 态模型、冲突引擎、事务流程）
@@ -134,7 +134,9 @@ discovered → installed → enabled → active → verified
 | GET | `/dsh-plugin-manager/plan?package=&enabled=` | 预览 toggle 影响 |
 | POST | `/dsh-plugin-manager/toggle?...` | 启用/禁用事务 |
 | POST | `/dsh-plugin-manager/install?spec=` | 异步安装，返回 jobId |
-| GET | `/dsh-plugin-manager/install?jobId=` | 轮询安装进度 |
+| GET | `/dsh-plugin-manager/check-update?package=` | 联网检查是否有新版本 |
+| POST | `/dsh-plugin-manager/update?package=` | 异步更新事务，返回 jobId |
+| GET | `/dsh-plugin-manager/install?jobId=` | 轮询安装/卸载/更新进度（通用 job 查询） |
 | POST | `/dsh-plugin-manager/uninstall?package=&confirm=true` | 卸载事务 |
 | GET | `/dsh-plugin-manager/market` | 发现市场候选列表 |
 | POST | `/dsh-plugin-manager/market/add?spec=&note=` | 手动添加候选 |
@@ -165,6 +167,32 @@ discovered → installed → enabled → active → verified
 | 版本不兼容 | `version` | high | Node 版本不满足 engines.node |
 
 低风险显式冲突可作为自动禁用候选；官方核心和核心 Service 不会自动关闭。
+
+## 检查更新与更新事务
+
+已装插件支持一键联网检查新版本，有更新时可一键执行更新事务。
+
+### 检查更新（check-update）
+
+- **npm 包**：查询 `registry.npmjs.org/<pkg>/latest` 的 dist-tags
+- **github 包**：查询 GitHub API 的 latest release；无 release 则取最新 tag
+- **离线/网络异常**：返回 `hasUpdate: false` + `error`，不抛错，前端展示降级提示
+- **无版本号**：返回 `error` 说明无法比较
+
+返回结构：`{ packageName, hasUpdate, current, latest, source, error? }`
+
+### 更新事务（update）
+
+复用 install 的事务结构：
+
+```
+快照 → pnpm update <package> → dump-config 校验 → 分层验证 → 失败回滚
+```
+
+- **不覆盖用户配置**：bundles / patch / pins / market 状态全部保留，update 只换代码
+- **官方核心受保护**：`@deepseek-ai/*` 不能通过本接口更新，用 dsh 自身的升级流程
+- **返回版本变化**：`{ version: { before, after } }`，让用户看到实际从哪个版本升到哪个版本
+- **异步 job**：和 install/uninstall 一样走 `startUpdate`，前端轮询进度
 
 ## 相关项目
 
@@ -221,11 +249,12 @@ plugin-manager-ui      列表、详情、计划、冲突、进度、结果
 
 ## 测试
 
-25 个测试覆盖：
+30 个测试覆盖：
 
 - 17 个原有测试：清单读取、状态判断、冲突检测、事务回滚、monorepo 降级、市场归一化
 - 5 个功能测试：重复插件 ID、缺失依赖、版本不兼容、job 持久化恢复、smoke check
-- 3 个新增测试：verifyProfile 语法层捕获错误、verifyProfile 合法插件通过、E2E 真实 pnpm install/uninstall
+- 3 个验证测试：verifyProfile 语法层捕获错误、verifyProfile 合法插件通过、E2E 真实 pnpm install/uninstall
+- 5 个更新测试：checkUpdate 缺失包/无版本号/npm registry 查询、updatePlugin 拒绝核心组件/拒绝缺失包
 
 ```bash
 node --test test.mjs

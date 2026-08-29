@@ -565,6 +565,89 @@ export async function installPlugin(profile, spec, { onStep } = {}) {
   return { ok: true, spec, packageName: installedName, restartRequired: true, snapshotDir, pnpm: `${pnpm.label} ${pnpm.version}`, verification };
 }
 
+// 检查更新：联网查询已装插件是否有新版本。
+// npm 包走 registry.npmjs.org 的 dist-tags/latest；github 包走 GitHub API 的 latest release 或最新 tag。
+// 离线/网络异常时返回 hasUpdate: false, error，不抛错，让前端能展示降级提示。
+export async function checkUpdate(profile, packageName) {
+  const dir = profileDir(profile);
+  const target = (await inspectProfile(dir)).entries.find((entry) => entry.packageName === packageName);
+  if (!target) throw new Error(`${packageName} 不在当前 Profile 的 bundles 里。`);
+  const current = target.version;
+  if (!current) return { packageName, hasUpdate: false, current: null, latest: null, source: target.specifier, error: '当前未记录版本号，无法比较。' };
+  const spec = target.specifier ?? '';
+  // npm 源：查询 registry 的 dist-tags
+  if (!spec.startsWith('github:')) {
+    try {
+      const res = await fetch(`https://registry.npmjs.org/${encodeURIComponent(packageName)}/latest`, { headers: { 'Accept': 'application/json' } });
+      if (!res.ok) return { packageName, hasUpdate: false, current, latest: null, source: spec, error: `registry 返回 ${res.status}` };
+      const data = await res.json();
+      const latest = data.version;
+      return { packageName, hasUpdate: latest && latest !== current, current, latest, source: spec };
+    } catch (error) {
+      return { packageName, hasUpdate: false, current, latest: null, source: spec, error: `网络异常：${error instanceof Error ? error.message : String(error)}` };
+    }
+  }
+  // github 源：查 latest release，没有 release 则查最新 tag
+  const repo = githubRepoFromSpecifier(spec);
+  if (!repo) return { packageName, hasUpdate: false, current, latest: null, source: spec, error: '无法解析 GitHub 仓库地址。' };
+  try {
+    const headers = { 'Accept': 'application/vnd.github+json', 'User-Agent': 'dsh-plugin-manager' };
+    const release = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, { headers }).then((r) => r.ok ? r.json() : null).catch(() => null);
+    if (release?.tag_name) {
+      const latest = release.tag_name.replace(/^v/, '');
+      return { packageName, hasUpdate: latest && latest !== current, current, latest, source: spec };
+    }
+    // 没有 release，查 tags
+    const tags = await fetch(`https://api.github.com/repos/${repo}/tags`, { headers }).then((r) => r.ok ? r.json() : null).catch(() => null);
+    const latestTag = Array.isArray(tags) && tags[0]?.name ? tags[0].name.replace(/^v/, '') : null;
+    return { packageName, hasUpdate: Boolean(latestTag) && latestTag !== current, current, latest: latestTag, source: spec, note: '仓库无 release，取最新 tag' };
+  } catch (error) {
+    return { packageName, hasUpdate: false, current, latest: null, source: spec, error: `GitHub API 异常：${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
+// 更新事务：快照 → pnpm update → dump-config 校验 → 分层验证 → 失败回滚。
+// 复用 install 的事务结构，但保留 bundles/patch/pins/market 状态不动（这些是用户配置，update 只换代码）。
+// 官方核心组件受保护，不能通过本接口更新（用 dsh 自身的升级流程）。
+export async function updatePlugin(profile, packageName, { onStep } = {}) {
+  const dir = profileDir(profile);
+  const target = (await inspectProfile(dir)).entries.find((entry) => entry.packageName === packageName);
+  if (!target) throw new Error(`${packageName} 不在当前 Profile 的 bundles 里。`);
+  if (!target.installed) throw new Error(`${packageName} 未安装，无法更新。`);
+  if (isCore(target)) throw new Error('官方核心组件受保护，请通过 dsh 自身的升级流程更新。');
+  const pnpm = await detectPnpm();
+  onStep?.({ label: `解析包管理器（${pnpm.label} ${pnpm.version}）` });
+  const packagePath = join(dir, 'package.json'), lockPath = join(dir, 'pnpm-lock.yaml');
+  const snapshotDir = join(dir, '.dsh-plugin-manager', 'snapshots', `update-${Date.now()}`);
+  await mkdir(snapshotDir, { recursive: true });
+  const beforePackage = await readFile(packagePath, 'utf8');
+  await cp(packagePath, join(snapshotDir, 'package.json'));
+  const lockBacked = await cp(lockPath, join(snapshotDir, 'pnpm-lock.yaml')).then(() => true).catch(() => false);
+  const onPnpmOutput = (label) => (line) => onStep?.({ label, detail: line });
+  let mutated = false;
+  try {
+    onStep?.({ label: `执行更新：pnpm update ${packageName}` });
+    await runPnpm(pnpm, ['update', packageName], dir, { onOutput: onPnpmOutput(`执行更新：pnpm update ${packageName}`) });
+    mutated = true;
+    const after = await json(packagePath, {});
+    const newVersion = after.dependencies?.[packageName] ? (await json(join(dir, 'node_modules', packageName, 'package.json'), {}))?.version : null;
+    onStep?.({ label: `校验配置树：dsh --dump-config` });
+    await dump(profile, dir);
+    onStep?.({ label: `分层验证` });
+  } catch (error) {
+    onStep?.({ label: '更新失败，正在回滚' });
+    await writeFile(packagePath, beforePackage, 'utf8');
+    if (mutated) await runPnpm(pnpm, ['install'], dir).catch(() => ({ stdout: '', stderr: '' }));
+    const lockRestored = await cp(join(snapshotDir, 'pnpm-lock.yaml'), lockPath).then(() => true).catch(() => false);
+    await dump(profile, dir).catch(() => {});
+    const lockNote = !lockBacked ? '快照未能备份 pnpm-lock.yaml。' : lockRestored ? '' : 'pnpm-lock.yaml 未能自动恢复，请从 .dsh-plugin-manager/snapshots 手动取回。';
+    throw new Error(`更新失败，已回滚 package.json。${lockNote}原因：${errorDetail(error)}`);
+  }
+  const verification = await verifyProfile(profile, dir).catch(() => ({ verified: false, level: 'syntax', checked: 0, issues: [], error: '验证执行异常' }));
+  const afterPkg = await json(join(dir, 'node_modules', packageName, 'package.json'), {});
+  return { ok: true, packageName, version: { before: target.version, after: afterPkg.version }, restartRequired: true, snapshotDir, verification };
+}
+
 // 卸载事务：先禁用并校验，确认不会拖垮 Profile，再真正 pnpm remove。
 export async function uninstallPlugin(profile, packageName, { onStep, unpin = false, confirm = false } = {}) {
   const dir = profileDir(profile);
@@ -654,6 +737,10 @@ export function startUninstall(profile, dir, packageName, options = {}) {
   const job = newJob('uninstall', profile, packageName);
   return trackJob(job, dir, () => uninstallPlugin(profile, packageName, { ...options, onStep: pushStep(job, dir) }));
 }
+export function startUpdate(profile, dir, packageName) {
+  const job = newJob('update', profile, packageName);
+  return trackJob(job, dir, () => updatePlugin(profile, packageName, { onStep: pushStep(job, dir) }));
+}
 // 同一步骤带 detail 的连续回调视为"进度更新"：就地更新最后一步，不再追加新步骤，
 // 前端轮询时就能看到 resolved/reused/downloaded 的实时行。
 // detail 更新不落盘（太频繁）；新步骤是里程碑，落盘以便重启后恢复。
@@ -689,8 +776,9 @@ export function apply(ctx) { ctx.inject?.(['webServer'], ({ webServer }) => webS
   if (req.method === 'POST' && url.pathname === '/dsh-plugin-manager/pin') { const pkg = url.searchParams.get('package'); if (!pkg) return send(res, 400, { ok: false, error: '缺少 package。' }); return send(res, 200, { ok: true, pinned: await setPinned(dir, pkg, url.searchParams.get('pinned') === 'true') }); }
   if (req.method === 'POST' && url.pathname === '/dsh-plugin-manager/install') { const spec = url.searchParams.get('spec'); if (!spec) return send(res, 400, { ok: false, error: '缺少 spec。' }); const job = startInstall(profile, dir, spec); return send(res, 200, { ok: true, jobId: job.id }); }
   if (req.method === 'POST' && url.pathname === '/dsh-plugin-manager/uninstall') { const pkg = url.searchParams.get('package'); if (!pkg) return send(res, 400, { ok: false, error: '缺少 package。' }); if (url.searchParams.get('confirm') !== 'true') return send(res, 400, { ok: false, error: '卸载是破坏性操作，必须带 confirm=true。' }); const job = startUninstall(profile, dir, pkg, { unpin: url.searchParams.get('unpin') === 'true', confirm: true }); return send(res, 200, { ok: true, jobId: job.id }); }
-  if (req.method === 'GET' && url.pathname === '/dsh-plugin-manager/install') { const job = await getJob(dir, url.searchParams.get('jobId')); if (!job) return send(res, 404, { ok: false, error: '任务不存在或已过期。' }); return send(res, 200, { ok: true, job }); }
-  if (req.method === 'GET' && url.pathname === '/dsh-plugin-manager/uninstall') { const job = await getJob(dir, url.searchParams.get('jobId')); if (!job) return send(res, 404, { ok: false, error: '任务不存在或已过期。' }); return send(res, 200, { ok: true, job }); }
+  if (req.method === 'GET' && url.pathname === '/dsh-plugin-manager/check-update') { const pkg = url.searchParams.get('package'); if (!pkg) return send(res, 400, { ok: false, error: '缺少 package。' }); return send(res, 200, { ok: true, ...(await checkUpdate(profile, pkg)) }); }
+  if (req.method === 'POST' && url.pathname === '/dsh-plugin-manager/update') { const pkg = url.searchParams.get('package'); if (!pkg) return send(res, 400, { ok: false, error: '缺少 package。' }); const job = startUpdate(profile, dir, pkg); return send(res, 200, { ok: true, jobId: job.id }); }
+  if (req.method === 'GET' && url.pathname === '/dsh-plugin-manager/install' || req.method === 'GET' && url.pathname === '/dsh-plugin-manager/uninstall' || req.method === 'GET' && url.pathname === '/dsh-plugin-manager/update') { const job = await getJob(dir, url.searchParams.get('jobId')); if (!job) return send(res, 404, { ok: false, error: '任务不存在或已过期。' }); return send(res, 200, { ok: true, job }); }
   return send(res, 404, { ok: false, error: '未知接口。' });
 } catch (error) { return send(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) }); } } })); }
 export default { name, inject, apply };

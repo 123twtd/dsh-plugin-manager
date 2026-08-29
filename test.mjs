@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { addMarketEntry, inspectMarket, importSnapshot, inspectProfile, managerPackageName, normalizeSpec, planToggle, removeMarketEntry, setPinned, uninstallPlugin, updatePatch, startInstall, startUninstall, assertInstallableBundle, smokeCheck, getJob, verifyProfile } from './manager.js';
+import { addMarketEntry, inspectMarket, importSnapshot, inspectProfile, managerPackageName, normalizeSpec, planToggle, removeMarketEntry, setPinned, uninstallPlugin, updatePatch, startInstall, startUninstall, startUpdate, assertInstallableBundle, smokeCheck, getJob, verifyProfile, checkUpdate, updatePlugin } from './manager.js';
 
 async function marketFixture(plugins, dependencies = {}) {
   const root = await mkdtemp(join(tmpdir(), 'pm-market-'));
@@ -461,4 +461,79 @@ test('E2E: install and uninstall a real npm package via transaction', { timeout:
     const afterPkgJson = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
     assert.ok(!afterPkgJson.dependencies['is-odd'], 'package.json 不应再包含 is-odd');
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+// --- checkUpdate 联网检查测试 ---
+// checkUpdate 用 profileDir(profile) 定位目录，测试通过 DSH_HOME 重定向到临时目录。
+
+test('checkUpdate returns error for missing package', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'pm-cu-missing-'));
+  process.env.DSH_HOME = home;
+  try {
+    const dir = join(home, 'profiles', 'test-profile');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'package.json'), JSON.stringify({ dsh: { profile: { bundles: [] } } }));
+    await writeFile(join(dir, 'cordis.patch.yml'), '[]\n');
+    await assert.rejects(checkUpdate('test-profile', 'nonexistent-pkg'), /不在当前 Profile 的 bundles 里/);
+  } finally { delete process.env.DSH_HOME; await rm(home, { recursive: true, force: true }); }
+});
+
+test('checkUpdate returns error for missing version', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'pm-cu-noversion-'));
+  process.env.DSH_HOME = home;
+  try {
+    const dir = join(home, 'profiles', 'test-profile');
+    await mkdir(join(dir, 'node_modules', 'no-version-plugin'), { recursive: true });
+    await writeFile(join(dir, 'node_modules', 'no-version-plugin', 'package.json'), JSON.stringify({ name: 'no-version-plugin', main: 'index.js' }));
+    await writeFile(join(dir, 'package.json'), JSON.stringify({ dsh: { profile: { bundles: ['no-version-plugin'] } }, dependencies: { 'no-version-plugin': '*' } }));
+    await writeFile(join(dir, 'cordis.patch.yml'), '[]\n');
+    const result = await checkUpdate('test-profile', 'no-version-plugin');
+    assert.equal(result.hasUpdate, false, '无版本号时 hasUpdate 应为 false');
+    assert.ok(result.error, '应返回 error 说明原因');
+  } finally { delete process.env.DSH_HOME; await rm(home, { recursive: true, force: true }); }
+});
+
+test('checkUpdate queries npm registry for real package', { timeout: 30_000 }, async () => {
+  const home = await mkdtemp(join(tmpdir(), 'pm-cu-npm-'));
+  process.env.DSH_HOME = home;
+  try {
+    const dir = join(home, 'profiles', 'test-profile');
+    await mkdir(join(dir, 'node_modules', 'is-odd'), { recursive: true });
+    await writeFile(join(dir, 'node_modules', 'is-odd', 'package.json'), JSON.stringify({ name: 'is-odd', version: '3.0.1', main: 'index.js' }));
+    await writeFile(join(dir, 'package.json'), JSON.stringify({ dsh: { profile: { bundles: ['is-odd'] } }, dependencies: { 'is-odd': '3.0.1' } }));
+    await writeFile(join(dir, 'cordis.patch.yml'), '[]\n');
+    const result = await checkUpdate('test-profile', 'is-odd');
+    assert.equal(result.packageName, 'is-odd');
+    assert.equal(result.current, '3.0.1');
+    // 网络可用时 latest 应有值；网络异常时 error 应有值。两者必居其一。
+    assert.ok(result.latest || result.error, '应有 latest 或 error');
+  } finally { delete process.env.DSH_HOME; await rm(home, { recursive: true, force: true }); }
+});
+
+// --- updatePlugin 事务测试 ---
+// updatePlugin 用 profileDir(profile) 定位目录，测试通过 DSH_HOME 重定向到临时目录。
+
+test('updatePlugin rejects core plugin', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'pm-up-core-'));
+  process.env.DSH_HOME = home;
+  try {
+    const dir = join(home, 'profiles', 'test-profile');
+    await mkdir(join(dir, 'node_modules', '@deepseek-ai', 'test'), { recursive: true });
+    await writeFile(join(dir, 'node_modules', '@deepseek-ai', 'test', 'package.json'), JSON.stringify({ name: '@deepseek-ai/test', version: '1.0.0', main: 'index.js' }));
+    await writeFile(join(dir, 'package.json'), JSON.stringify({ dsh: { profile: { bundles: ['@deepseek-ai/test'] } }, dependencies: { '@deepseek-ai/test': '1.0.0' } }));
+    await writeFile(join(dir, 'cordis.patch.yml'), '[]\n');
+    await assert.rejects(updatePlugin('test-profile', '@deepseek-ai/test'), /官方核心组件受保护/);
+  } finally { delete process.env.DSH_HOME; await rm(home, { recursive: true, force: true }); }
+});
+
+test('updatePlugin rejects missing package', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'pm-up-missing-'));
+  process.env.DSH_HOME = home;
+  try {
+    const dir = join(home, 'profiles', 'test-profile');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'package.json'), JSON.stringify({ dsh: { profile: { bundles: [] } } }));
+    await writeFile(join(dir, 'cordis.patch.yml'), '[]\n');
+    await assert.rejects(updatePlugin('test-profile', 'nonexistent'), /不在当前 Profile 的 bundles 里/);
+  } finally { delete process.env.DSH_HOME; await rm(home, { recursive: true, force: true }); }
 });

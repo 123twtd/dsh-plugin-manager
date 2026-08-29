@@ -9,7 +9,7 @@ window.__ModuleLoader__.load({
     const cell = { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
     const conflictLabel = { explicit: '作者声明冲突', service: '重复 Service Provider', route: '重复路由', command: '重复命令', port: '重复端口' };
     const categoryLabel = { ui: '界面增强', tools: '工具', workflow: '工作流', session: '会话管理', memory: '记忆', model: '模型', dev: '开发', theme: '主题', notify: '通知', fun: '趣味' };
-    const ACTION_COPY = { detail: '详情', pin: '置顶', pinned: '已置顶', enable: '启用', disable: '禁用', uninstall: '卸载', remove: '舍弃', install: '安装并启用', installing: '安装中…', opening: '打开仓库' };
+    const ACTION_COPY = { detail: '详情', pin: '置顶', pinned: '已置顶', enable: '启用', disable: '禁用', uninstall: '卸载', remove: '舍弃', install: '安装并启用', installing: '安装中…', opening: '打开仓库', checkUpdate: '检查更新', updating: '检查中…', update: '更新' };
     const formatRelative = (ms) => {
       if (!Number.isFinite(ms) || ms < 0) return '';
       const seconds = Math.round(ms / 1000);
@@ -95,12 +95,18 @@ window.__ModuleLoader__.load({
       const [manualSpec, setManualSpec] = React.useState('');
       const [manualNote, setManualNote] = React.useState('');
       const [marketToolsOpen, setMarketToolsOpen] = React.useState(false);
+      const [updateInfo, setUpdateInfo] = React.useState({});  // { [packageName]: { loading, hasUpdate, latest, current, error } }
       const confirmRef = React.useRef(null);
       const guardRef = React.useRef(null);
       const timerRef = React.useRef(null);
       const pageSize = 20;
       const reload = React.useCallback(async () => { try { const body = await fetch('/dsh-plugin-manager/inventory').then(readBody); setState({ loading:false, entries:body.entries || [], conflicts:body.conflicts || [], error:'' }); setDetail((old) => old ? (body.entries || []).find((entry) => entry.packageName === old.packageName) ?? null : null); } catch (error) { setState((old) => ({ ...old, loading:false, error:error instanceof Error ? error.message : String(error) })); } }, []);
       const reloadMarket = React.useCallback(async () => { try { const body = await fetch('/dsh-plugin-manager/market').then(readBody); setMarket({ loading:false, entries:body.entries || [], importable:body.importable || { available:false }, updatedAt:body.updatedAt ?? null, error:'' }); } catch (error) { setMarket((old) => ({ ...old, loading:false, error:error instanceof Error ? error.message : String(error) })); } }, []);
+      const checkUpdate = React.useCallback(async (entry) => {
+        setUpdateInfo((old) => ({ ...old, [entry.packageName]: { loading: true } }));
+        try { const body = await fetch(`/dsh-plugin-manager/check-update?package=${encodeURIComponent(entry.packageName)}`).then(readBody); setUpdateInfo((old) => ({ ...old, [entry.packageName]: { loading: false, ...body } })); }
+        catch (error) { setUpdateInfo((old) => ({ ...old, [entry.packageName]: { loading: false, error: error instanceof Error ? error.message : String(error) } })); }
+      }, []);
       React.useEffect(() => { reload(); reloadMarket(); }, [reload, reloadMarket]);
       React.useEffect(() => { if (tab !== 'installed') return undefined; setPage(0); }, [tab, query, category, status]);
       React.useEffect(() => { if (tab !== 'market') return undefined; setMarketPage(0); }, [tab, marketQuery, marketCategory, marketStatus]);
@@ -157,10 +163,11 @@ window.__ModuleLoader__.load({
           }
           if (job.state === 'failed') throw new Error(job.error || '任务失败。');
           await Promise.all([reload(), reloadMarket()]);
-          if (kind === 'install') { const v = job.result?.verification; setNotice({ kind: v?.verified === false ? 'info' : 'ok', text:`已安装并启用 ${job.result?.packageName ?? label}${v?.verified === false ? `（smoke check 发现 ${v.issues.length} 个入口文件问题）` : ''}。重启 Harness 后完全生效。` }); }
-          else { const v = job.result?.verification; setNotice({ kind: v?.verified === false ? 'info' : 'ok', text:`已彻底卸载 ${label}${job.result?.market?.returned ? '，并已退回发现市场' : ''}${v?.verified === false ? `（smoke check 发现 ${v.issues.length} 个入口文件问题）` : ''}。重启 Harness 后完全生效。` }); }
+          if (kind === 'install') { const v = job.result?.verification; setNotice({ kind: v?.verified === false ? 'info' : 'ok', text:`已安装并启用 ${job.result?.packageName ?? label}${v?.verified === false ? `（验证发现 ${v.issues.length} 个问题）` : ''}。重启 Harness 后完全生效。` }); }
+          else if (kind === 'update') { const v = job.result?.verification; const ver = job.result?.version; setNotice({ kind: v?.verified === false ? 'info' : 'ok', text:`已更新 ${label}${ver ? `（${ver.before ?? '?'} → ${ver.after ?? '?'}）` : ''}${v?.verified === false ? `（验证发现 ${v.issues.length} 个问题）` : ''}。重启 Harness 后完全生效。` }); }
+          else { const v = job.result?.verification; setNotice({ kind: v?.verified === false ? 'info' : 'ok', text:`已彻底卸载 ${label}${job.result?.market?.returned ? '，并已退回发现市场' : ''}${v?.verified === false ? `（验证发现 ${v.issues.length} 个问题）` : ''}。重启 Harness 后完全生效。` }); }
         } catch (error) {
-          setNotice({ kind:'error', text:`${kind === 'install' ? '安装' : '卸载'} ${label} 失败：${error instanceof Error ? error.message : String(error)}` });
+          setNotice({ kind:'error', text:`${kind === 'install' ? '安装' : kind === 'update' ? '更新' : '卸载'} ${label} 失败：${error instanceof Error ? error.message : String(error)}` });
         } finally {
           // 用函数式更新读最新 state（闭包里的 task 是发起时的旧值）：
           // 失败的弹窗必须保留，让用户看清错误原因并手动关闭；成功的弹窗 1.5 秒后自动关。
@@ -181,6 +188,9 @@ window.__ModuleLoader__.load({
         const approved = await askGuard({ entry, action:'uninstall' });
         if (!approved) return;
         await runTask('uninstall', `/dsh-plugin-manager/uninstall?package=${encodeURIComponent(entry.packageName)}&unpin=${entry.pinned}&confirm=true`, entry.packageName);
+      }, [runTask]);
+      const requestUpdate = React.useCallback(async (entry) => {
+        await runTask('update', `/dsh-plugin-manager/update?package=${encodeURIComponent(entry.packageName)}`, entry.packageName);
       }, [runTask]);
       const install = React.useCallback(async (candidate) => {
         await runTask('install', `/dsh-plugin-manager/install?spec=${encodeURIComponent(candidate.spec)}`, candidate.repoName);
@@ -239,7 +249,7 @@ window.__ModuleLoader__.load({
         const repoUrl = githubUrlFor(entry);
         const baseClass = protectedEntry ? 'dshpm-row manager' : entry.pinned ? 'dshpm-row pinned' : 'dshpm-row';
         return jsxs('div', { className:baseClass, onDoubleClick: () => setDetail(entry), title:'双击查看详情', children:[
-          jsxs('div', { className:'dshpm-name', style:cell, children:[entry.packageName, entry.version ? jsx('span', { className:'dshpm-version', children:`v${entry.version}` }) : null] }),
+          jsxs('div', { className:'dshpm-name', style:cell, children:[entry.packageName, entry.version ? jsx('span', { className:'dshpm-version', children:`v${entry.version}` }) : null, updateInfo[entry.packageName] && !updateInfo[entry.packageName].loading ? (updateInfo[entry.packageName].hasUpdate ? jsx('span', { className:'dshpm-version', style:{ color:'#2563eb' }, title:`最新 v${updateInfo[entry.packageName].latest}`, children:`→ v${updateInfo[entry.packageName].latest}` }) : updateInfo[entry.packageName].error ? jsx('span', { className:'dshpm-version', style:{ opacity:.6 }, title:updateInfo[entry.packageName].error, children:'检查失败' }) : jsx('span', { className:'dshpm-version', style:{ opacity:.6 }, children:'已是最新' })) : null] }),
           jsx('span', { className:'dshpm-meta dshpm-category', style:cell, children:categoryLabel[entry.category] ?? entry.category }), jsx('span', { className:'dshpm-meta dshpm-source', style:cell, title:entry.sourceLabel, children:entry.sourceLabel }),
           jsx('span', { className:`dshpm-state ${entry.enabled ? 'on' : 'off'}`, style:cell, children:entry.enabled ? '已启用' : '未启用' }),
           jsxs('div', { className:'dshpm-actions', children:[
@@ -254,6 +264,8 @@ window.__ModuleLoader__.load({
                   repoUrl ? IconButton({ title:repoTitle(entry), onClick:openExternal(repoUrl), children: jsx(ExternalIcon, {}) }) : null,
                   IconButton({ title:entry.pinned ? '取消置顶，置顶的插件会被排到独立分区' : '置顶，会单独移到最上面的「已置顶」区', onClick:() => pin(entry, !entry.pinned), disabled:busy, children: entry.pinned ? jsx('span', { style:{ color:'var(--dsw-alias-brand-primary)', fontWeight:600 }, children:'★' }) : jsx('span', { children:'☆' }) }),
                   IconButton({ title:entry.enabled ? `禁用 ${entry.packageName}` : `启用 ${entry.packageName}`, danger:!entry.enabled, onClick:() => requestToggle(entry), disabled:busy, children: busy ? jsx('span', { children:'…' }) : entry.enabled ? jsx('span', { style:{ color:'#b3352f' }, children:'停' }) : jsx('span', { style:{ color:'#258a49' }, children:'启' }) }),
+                  entry.installed ? IconButton({ title: ACTION_COPY.checkUpdate, onClick: () => checkUpdate(entry), disabled: updateInfo[entry.packageName]?.loading, children: updateInfo[entry.packageName]?.loading ? jsx('span', { children:'…' }) : jsx('span', { style:{ color:'#2563eb' }, children:'检' }) }) : null,
+                  updateInfo[entry.packageName]?.hasUpdate ? IconButton({ title: `更新到 v${updateInfo[entry.packageName].latest}`, onClick: () => requestUpdate(entry), disabled: busy, children: jsx('span', { style:{ color:'#2563eb', fontWeight: 600 }, children:'升' }) }) : null,
                   IconButton({ title:`卸载 ${entry.packageName}（先确认是否取消置顶，会执行 pnpm remove 删除代码）`, danger:true, onClick:() => requestUninstall(entry), disabled:busy, children: jsx('span', { children:'卸' }) })
                 ] })
           ] })
@@ -332,8 +344,8 @@ window.__ModuleLoader__.load({
             ] }, `${s.index}:${s.label}`);
           }) }),
           job.state === 'failed' ? jsx('p', { className:'dshpm-notice error', role:'alert', children:job.error }) : null,
-          job.state === 'succeeded' ? jsx('p', { className:'dshpm-notice ok', role:'status', children:task.kind === 'install' ? `已安装并启用 ${job.result?.packageName ?? task.label}。重启 Harness 后完全生效。` : `已彻底卸载 ${task.label}${job.result?.market?.returned ? '，并已退回发现市场' : ''}。重启 Harness 后完全生效。` }) : null,
-          job.state === 'running' ? jsx('p', { className:'dshpm-sub', children:task.kind === 'install' ? '请不要关闭设置页：进度会自动刷新，遇到错误会显示在最后一步。' : '卸载会调用 pnpm remove，请等待完成后让进度自然消失。' }) : null
+          job.state === 'succeeded' ? jsx('p', { className:'dshpm-notice ok', role:'status', children:task.kind === 'install' ? `已安装并启用 ${job.result?.packageName ?? task.label}。重启 Harness 后完全生效。` : task.kind === 'update' ? `已更新 ${task.label}。重启 Harness 后完全生效。` : `已彻底卸载 ${task.label}${job.result?.market?.returned ? '，并已退回发现市场' : ''}。重启 Harness 后完全生效。` }) : null,
+          job.state === 'running' ? jsx('p', { className:'dshpm-sub', children:task.kind === 'install' ? '请不要关闭设置页：进度会自动刷新，遇到错误会显示在最后一步。' : task.kind === 'update' ? '更新会调用 pnpm update，请等待完成后让进度自然消失。' : '卸载会调用 pnpm remove，请等待完成后让进度自然消失。' }) : null
         ] });
       };
 

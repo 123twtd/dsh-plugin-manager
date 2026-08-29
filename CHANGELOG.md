@@ -2,6 +2,23 @@
 
 本格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.0] - 2026-08-29
+
+### 新增
+
+- **检查更新 `checkUpdate`**：联网查询已装插件是否有新版本。npm 包走 `registry.npmjs.org` 的 dist-tags；github 包走 GitHub API 的 latest release 或最新 tag。离线/网络异常时返回降级提示而非抛错
+- **更新事务 `updatePlugin`**：复用 install 的事务结构（快照 → pnpm update → dump-config → 分层验证 → 失败回滚）。保留用户配置（bundles/patch/pins/market）不动，只换代码。官方核心组件受保护不可更新
+- **`startUpdate`**：异步 job，前端轮询进度，和 install/uninstall 一致
+- **HTTP 接口**：`GET /dsh-plugin-manager/check-update?package=` + `POST /dsh-plugin-manager/update?package=`，通用 job 查询合并 install/uninstall/update
+- **UI 检查更新按钮**：每个已装插件卡片新增「检」按钮，一键联网查询；有更新时显示版本变化（`v1.0.0 → v1.1.0`）和「升」按钮，走异步进度
+- **5 个新测试**：checkUpdate 缺失包/无版本号/npm registry 查询、updatePlugin 拒绝核心组件/拒绝缺失包
+
+### 变更
+
+- 版本号升至 `0.2.0`（新增面向用户的功能 API）
+- job 查询接口合并：install/uninstall/update 共用 `GET ?jobId=` 轮询
+- 成功提示文案统一"验证发现 N 个问题"（原"smoke check"措辞）
+
 ## [0.1.1] - 2026-08-29
 
 ### 新增
