@@ -41,15 +41,32 @@ function githubRepoFromSpecifier(specifier) {
   const match = typeof specifier === 'string' ? specifier.match(/^github:([^#]+?)(?:#.*)?$/i) : undefined;
   return match?.[1];
 }
-// 从已装包的 node_modules/<pkg>/package.json 读取 repository 字段，提取 GitHub 仓库名。
+// 从 entry 提取 GitHub 仓库名。inspectProfile 已经把 pkg.repository 过了一次 githubRepo()，
+// 存进去的要么是完整 URL/对象，要么是提取好的 "owner/repo" 纯名。这里两种都要处理。
 async function githubRepoFromEntry(entry) {
   try {
-    const dir = process.env.DSH_HOME ? join(process.env.DSH_HOME, 'profiles') : join(process.env.USERPROFILE || process.cwd(), '.dsh', 'profiles');
-    // profile 名未知，尝试从 entry.moduleDir 或遍历 profiles 找
-    // 简化方案：直接用 entry 的 repository（inspectProfile 已经从 package.json 里读出来了）
-    if (entry.repository) return githubRepo(entry.repository);
+    if (!entry.repository) return null;
+    // 如果已经是 "owner/repo" 形式（inspectProfile 提取后的结果），直接用
+    if (typeof entry.repository === 'string' && /^[^/]+\/[^/]+$/.test(entry.repository)) return entry.repository;
+    // 否则尝试从完整 URL/对象提取
+    return githubRepo(entry.repository);
   } catch {}
   return null;
+}
+// 语义化版本比较：返回正数 a>b，负数 a<b，0 相等。非语义化版本 fallback 到字符串比较。
+function semverCompare(a, b) {
+  if (!a || !b) return 0;
+  const ap = a.replace(/^v/, '').split('.').map((n) => parseInt(n, 10) || 0);
+  const bp = b.replace(/^v/, '').split('.').map((n) => parseInt(n, 10) || 0);
+  const len = Math.max(ap.length, bp.length);
+  for (let i = 0; i < len; i++) {
+    const av = ap[i] || 0, bv = bp[i] || 0;
+    if (av !== bv) return av - bv;
+  }
+  return 0;
+}
+function hasNewerVersion(current, latest) {
+  return Boolean(latest) && semverCompare(latest, current) > 0;
 }
 // GitHub API 查询最新 release / tag 的统一逻辑。
 async function githubLatest(packageName, current, source, repo) {
@@ -58,12 +75,12 @@ async function githubLatest(packageName, current, source, repo) {
     const release = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, { headers }).then((r) => r.ok ? r.json() : null).catch(() => null);
     if (release?.tag_name) {
       const latest = release.tag_name.replace(/^v/, '');
-      return { packageName, hasUpdate: latest && latest !== current, current, latest, source, repo };
+      return { packageName, hasUpdate: hasNewerVersion(current, latest), current, latest, source, repo };
     }
     const tags = await fetch(`https://api.github.com/repos/${repo}/tags`, { headers }).then((r) => r.ok ? r.json() : null).catch(() => null);
     const latestTag = Array.isArray(tags) && tags[0]?.name ? tags[0].name.replace(/^v/, '') : null;
     if (!latestTag) return { packageName, hasUpdate: false, current, latest: null, source, repo, error: '仓库无 release 也无 tag' };
-    return { packageName, hasUpdate: Boolean(latestTag) && latestTag !== current, current, latest: latestTag, source, repo, note: '仓库无 release，取最新 tag' };
+    return { packageName, hasUpdate: hasNewerVersion(current, latestTag), current, latest: latestTag, source, repo, note: '仓库无 release，取最新 tag' };
   } catch (error) {
     return { packageName, hasUpdate: false, current, latest: null, source, repo, error: `GitHub API 异常：${error instanceof Error ? error.message : String(error)}` };
   }
@@ -652,7 +669,7 @@ export async function checkUpdate(profile, packageName) {
       if (res.ok) {
         const data = await res.json();
         const latest = data.version;
-        return { packageName, hasUpdate: latest && latest !== current, current, latest, source: spec };
+        return { packageName, hasUpdate: hasNewerVersion(current, latest), current, latest, source: spec };
       }
       // registry 查不到（404）：可能是本地自建包，尝试从 package.json 的 repository 字段提取 GitHub 仓库
       if (res.status === 404) {
