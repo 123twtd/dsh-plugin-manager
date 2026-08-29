@@ -128,7 +128,7 @@ export async function inspectProfile(dir) {
   for (let i = 0; i < entries.length; i += 1) for (let j = i + 1; j < entries.length; j += 1) {
     const left = entries[i], right = entries[j];
     const add = (kind, evidence, severity = 'high') => conflicts.push({ kind, left: left.packageName, right: right.packageName, evidence, severity, canAutoDisable: false, recommendation: '保留当前状态并要求用户确认；核心组件不会自动关闭。' });
-    if (left.declaredConflicts.includes(right.packageName) || right.declaredConflicts.includes(right.packageName)) add('explicit', '作者声明冲突');
+    if (left.declaredConflicts.includes(right.packageName) || right.declaredConflicts.includes(left.packageName)) add('explicit', '作者声明冲突');
     for (const service of left.services.provides ?? []) if ((right.services.provides ?? []).includes(service)) add('service', `重复 Provider: ${service}`, 'critical');
     for (const route of left.resources.routes ?? []) if ((right.resources.routes ?? []).includes(route)) add('route', `重复路由: ${route}`);
     for (const command of left.resources.commands ?? []) if ((right.resources.commands ?? []).includes(command)) add('command', `重复命令: ${command}`);
