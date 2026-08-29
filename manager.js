@@ -176,9 +176,36 @@ function setDisabled(items, id, disabled, doc) {
 }
 
 async function dump(profile, dir) { await exec(process.platform === 'win32' ? 'dsh.cmd' : 'dsh', ['--profile', profile, '--dump-config'], { cwd: dir, timeout: 30_000, shell: process.platform === 'win32' }); }
-// Smoke check：dump-config 验证配置树后，再检查每个已启用 bundle 的入口文件存在且语法正确。
-// 这是 verified 状态的证据基础——不是完整 Loader 启动，但能捕获文件缺失和语法错误。
-// 失败不回滚：插件仍处于 enabled，但 verification.issues 会提示用户。
+// 分层验证：verified 状态的证据基础。三层逐级加深，任一层失败即终止并返回问题。
+//   level 'syntax' : node --check 校验入口文件语法（最轻量，不需要 dsh）
+//   level 'config' : dsh --dump-config 验证配置树合法（需要 dsh 在 PATH）
+//   level 'loader' : 真实 Loader 启动，等待 ready 信号或超时崩溃检测（完整 verified 证据）
+// dsh 不可用时降级到 syntax 层，但 verificationLevel 会如实标注。
+// 失败不回滚：插件仍处于 enabled，但 issues 会提示用户。
+export async function verifyProfile(profile, dir) {
+  const inventory = await inspectProfile(dir);
+  const issues = [];
+  let checked = 0;
+  let level = 'syntax';
+  // 第一层：入口文件存在 + node --check 语法校验
+  for (const entry of inventory.entries) {
+    if (!entry.enabled || !entry.installed) continue;
+    const pkgPath = join(dir, 'node_modules', entry.packageName, 'package.json');
+    const pkg = await json(pkgPath, null);
+    const mainFile = pkg?.main ?? 'index.js';
+    const mainPath = join(dir, 'node_modules', entry.packageName, mainFile);
+    try { await readFile(mainPath, 'utf8'); await exec('node', ['--check', mainPath], { timeout: 10_000 }); checked += 1; }
+    catch (error) { issues.push({ packageName: entry.packageName, file: mainFile, level: 'syntax', error: (error.stderr ?? error.message ?? String(error)).slice(0, 200) }); }
+  }
+  if (issues.length > 0) return { verified: false, level, checked, issues, verifiedAt: null };
+  // 第二层：dump-config 验证配置树合法。dsh 不可用时降级到 syntax 层，不报 issue。
+  try { await dump(profile, dir); level = 'config'; }
+  catch (error) { return { verified: false, level, checked, issues, verifiedAt: null, degraded: 'dsh 不可用，仅完成 syntax 层验证' }; }
+  // 第三层：真实 Loader 启动验证。启动 dsh 进程，等待 ready 信号或超时崩溃。
+  level = await loaderSmokeTest(profile, dir) ? 'loader' : level;
+  return { verified: level === 'loader', level, checked, issues, verifiedAt: level === 'loader' ? new Date().toISOString() : null };
+}
+// 兼容旧调用方：smokeCheck 保留为 verifyProfile 的语法层子集。
 export async function smokeCheck(dir) {
   const inventory = await inspectProfile(dir);
   const issues = [];
@@ -193,6 +220,28 @@ export async function smokeCheck(dir) {
     catch (error) { issues.push({ packageName: entry.packageName, file: mainFile, error: (error.stderr ?? error.message ?? String(error)).slice(0, 200) }); }
   }
   return { verified: issues.length === 0, checked, issues, verifiedAt: issues.length === 0 ? new Date().toISOString() : null };
+}
+// Loader 启动验证：启动 dsh 进程，等待 ready 信号或检测崩溃退出。
+// 返回 true 表示 Loader 成功启动（verified）；false 表示 dsh 不可用或启动失败。
+async function loaderSmokeTest(profile, dir) {
+  const bin = process.platform === 'win32' ? 'dsh.cmd' : 'dsh';
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (result) => { if (!settled) { settled = true; try { child.kill('SIGTERM'); } catch {} resolve(result); } };
+    let child;
+    try {
+      child = spawn(bin, ['--profile', profile], { cwd: dir, shell: process.platform === 'win32', stdio: ['pipe', 'pipe', 'pipe'] });
+    } catch { resolve(false); return; }
+    const timer = setTimeout(() => done(false), 15_000);
+    let stderrBuf = '';
+    child.stderr?.on('data', (chunk) => {
+      stderrBuf += chunk.toString();
+      // ready 信号：dsh 启动成功后输出 "ready" / "harness ready" / "listening"
+      if (/ready|listening|harness\s+(ready|started)/i.test(stderrBuf)) { clearTimeout(timer); done(true); }
+    });
+    child.on('exit', (code) => { clearTimeout(timer); done(code === 0); });
+    child.on('error', () => { clearTimeout(timer); done(false); });
+  });
 }
 export function updatePatch(before, changes) {
   const doc = parseDocument(before);
@@ -220,7 +269,7 @@ export async function applyToggle(profile, packageName, enabled, options = {}) {
   });
   await writeFile(patchPath, updatePatch(before, changes), 'utf8');
   try { await dump(profile, dir); } catch (error) { await writeFile(patchPath, before, 'utf8'); throw new Error(`配置校验失败，已回滚：${error.stderr ?? error}`); }
-  const verification = await smokeCheck(dir).catch(() => ({ verified: false, checked: 0, issues: [], error: 'smoke check 执行异常' }));
+  const verification = await verifyProfile(profile, dir).catch(() => ({ verified: false, level: 'syntax', checked: 0, issues: [], error: '验证执行异常' }));
   const inventory = await inspectProfile(dir);
   return { ok: true, plan, snapshotDir, entry: inventory.entries.find((x) => x.packageName === packageName), restartRequired: true, verification };
 }
@@ -512,7 +561,7 @@ export async function installPlugin(profile, spec, { onStep } = {}) {
     const lockNote = !lockBacked ? '快照未能备份 pnpm-lock.yaml。' : lockRestored ? '' : 'pnpm-lock.yaml 未能自动恢复，请从 .dsh-plugin-manager/snapshots 手动取回。';
     throw new Error(`安装失败，已回滚 package.json（node_modules 中可能残留文件，可手动执行 pnpm install 修复）。${lockNote}原因：${errorDetail(error)}`);
   }
-  const verification = await smokeCheck(dir).catch(() => ({ verified: false, checked: 0, issues: [], error: 'smoke check 执行异常' }));
+  const verification = await verifyProfile(profile, dir).catch(() => ({ verified: false, level: 'syntax', checked: 0, issues: [], error: '验证执行异常' }));
   return { ok: true, spec, packageName: installedName, restartRequired: true, snapshotDir, pnpm: `${pnpm.label} ${pnpm.version}`, verification };
 }
 
@@ -567,7 +616,7 @@ export async function uninstallPlugin(profile, packageName, { onStep, unpin = fa
     throw new Error(`卸载失败，已回滚 package.json / cordis.patch.yml（node_modules 中可能残留文件，可手动执行 pnpm install 修复）。${lockNote}原因：${errorDetail(error)}`);
   }
   const market = await returnToMarket(dir, { packageName, spec, target });
-  const verification = await smokeCheck(dir).catch(() => ({ verified: false, checked: 0, issues: [], error: 'smoke check 执行异常' }));
+  const verification = await verifyProfile(profile, dir).catch(() => ({ verified: false, level: 'syntax', checked: 0, issues: [], error: '验证执行异常' }));
   return { ok: true, packageName, spec, restartRequired: true, market, snapshotDir, verification };
 }
 

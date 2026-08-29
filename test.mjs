@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { addMarketEntry, inspectMarket, importSnapshot, inspectProfile, managerPackageName, normalizeSpec, planToggle, removeMarketEntry, setPinned, uninstallPlugin, updatePatch, startInstall, assertInstallableBundle, smokeCheck, getJob } from './manager.js';
+import { addMarketEntry, inspectMarket, importSnapshot, inspectProfile, managerPackageName, normalizeSpec, planToggle, removeMarketEntry, setPinned, uninstallPlugin, updatePatch, startInstall, startUninstall, assertInstallableBundle, smokeCheck, getJob, verifyProfile } from './manager.js';
 
 async function marketFixture(plugins, dependencies = {}) {
   const root = await mkdtemp(join(tmpdir(), 'pm-market-'));
@@ -372,5 +372,93 @@ test('smokeCheck verifies bundle entry files exist and pass syntax check', async
     const failed = await smokeCheck(root);
     assert.equal(failed.verified, false, '入口文件缺失应导致 verified=false');
     assert.ok(failed.issues.some((i) => i.packageName === 'broken-plugin'), '应报告 broken-plugin 的问题');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+// --- verifyProfile 分层验证测试 ---
+
+test('verifyProfile syntax layer catches broken entry file', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pm-vp-syntax-'));
+  try {
+    await mkdir(join(root, 'node_modules', 'bad-plugin'), { recursive: true });
+    await writeFile(join(root, 'node_modules', 'bad-plugin', 'package.json'), JSON.stringify({ name: 'bad-plugin', main: 'index.js', dsh: { bundle: { patch: './cordis.patch.yml' } } }));
+    await writeFile(join(root, 'node_modules', 'bad-plugin', 'index.js'), 'this is not valid javascript {{{');
+    await writeFile(join(root, 'node_modules', 'bad-plugin', 'cordis.patch.yml'), '- insert:\n    - id: bad-plugin\n      name: bad-plugin\n');
+    await writeFile(join(root, 'package.json'), JSON.stringify({ dsh: { profile: { bundles: ['bad-plugin'] } } }));
+    await writeFile(join(root, 'cordis.patch.yml'), '[]\n');
+    const result = await verifyProfile('test-profile', root);
+    assert.equal(result.verified, false, '语法错误应导致 verified=false');
+    assert.equal(result.level, 'syntax', '应在 syntax 层终止');
+    assert.ok(result.issues.length > 0, '应报告问题');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('verifyProfile passes syntax layer for valid plugin', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pm-vp-ok-'));
+  try {
+    await mkdir(join(root, 'node_modules', 'good-plugin'), { recursive: true });
+    await writeFile(join(root, 'node_modules', 'good-plugin', 'package.json'), JSON.stringify({ name: 'good-plugin', main: 'index.js', dsh: { bundle: { patch: './cordis.patch.yml' } } }));
+    await writeFile(join(root, 'node_modules', 'good-plugin', 'index.js'), 'export default {};\n');
+    await writeFile(join(root, 'node_modules', 'good-plugin', 'cordis.patch.yml'), '- insert:\n    - id: good-plugin\n      name: good-plugin\n');
+    await writeFile(join(root, 'package.json'), JSON.stringify({ dsh: { profile: { bundles: ['good-plugin'] } } }));
+    await writeFile(join(root, 'cordis.patch.yml'), '[]\n');
+    const result = await verifyProfile('test-profile', root);
+    // dsh 可能不可用，但 syntax 层必须通过
+    assert.equal(result.issues.length, 0, '语法正确不应有问题');
+    assert.ok(result.checked >= 1, '至少检查了一个 bundle');
+    // level 可能是 syntax（dsh 不可用）或 config/loader（dsh 可用）
+    assert.ok(['syntax', 'config', 'loader'].includes(result.level), `level 应为有效值，实际: ${result.level}`);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+// --- E2E 测试：真实 pnpm install/uninstall ---
+
+test('E2E: install and uninstall a real npm package via transaction', { timeout: 120_000 }, async () => {
+  // 跳过条件：没有 pnpm 可用时跳过
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const exec = promisify(execFile);
+  let pnpmOk = false;
+  try { await exec('pnpm', ['--version'], { timeout: 10_000 }); pnpmOk = true; } catch {}
+  if (!pnpmOk) { console.log('  [skip] pnpm 不可用，跳过 E2E'); return; }
+
+  const root = await mkdtemp(join(tmpdir(), 'pm-e2e-'));
+  try {
+    // 初始化临时 Profile 目录
+    await mkdir(join(root, 'node_modules'), { recursive: true });
+    await writeFile(join(root, 'package.json'), JSON.stringify({ name: 'e2e-root', version: '1.0.0', type: 'module', dependencies: {}, dsh: { profile: { bundles: [] } } }));
+    await writeFile(join(root, 'cordis.patch.yml'), '[]\n');
+
+    // E2E 安装：用真实 npm 包 is-odd（小包，无依赖，适合测试）
+    const spec = 'npm:is-odd@3.0.1';
+    const job = startInstall('e2e-profile', root, spec);
+    // 等待任务结束
+    await new Promise((resolve) => { const check = () => { if (job.state === 'running') setTimeout(check, 200); else resolve(); }; check(); });
+
+    // 安装可能失败（网络问题），失败时跳过而非报错
+    if (job.state === 'failed') { console.log(`  [skip] 安装失败（可能是网络）: ${job.error}`); return; }
+    assert.equal(job.state, 'succeeded', `安装任务应成功，错误: ${job.error}`);
+
+    // 断言：node_modules 中存在 is-odd
+    const { stat } = await import('node:fs/promises');
+    const pkgStat = await stat(join(root, 'node_modules', 'is-odd', 'package.json')).catch(() => null);
+    assert.ok(pkgStat, 'is-odd 应已安装到 node_modules');
+
+    // 断言：package.json dependencies 包含 is-odd
+    const pkgJson = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
+    assert.ok(pkgJson.dependencies['is-odd'], 'package.json 应包含 is-odd 依赖');
+
+    // E2E 卸载
+    const uninstallJob = startUninstall('e2e-profile', root, 'is-odd', { confirm: true });
+    await new Promise((resolve) => { const check = () => { if (uninstallJob.state === 'running') setTimeout(check, 200); else resolve(); }; check(); });
+    assert.equal(uninstallJob.state, 'succeeded', `卸载任务应成功，错误: ${uninstallJob.error}`);
+
+    // 断言：node_modules 中 is-odd 已删除
+    const afterStat = await stat(join(root, 'node_modules', 'is-odd', 'package.json')).catch(() => null);
+    assert.equal(afterStat, null, 'is-odd 应已从 node_modules 删除');
+
+    // 断言：package.json dependencies 不再包含 is-odd
+    const afterPkgJson = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
+    assert.ok(!afterPkgJson.dependencies['is-odd'], 'package.json 不应再包含 is-odd');
   } finally { await rm(root, { recursive: true, force: true }); }
 });

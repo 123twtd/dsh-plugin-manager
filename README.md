@@ -23,7 +23,7 @@ DeepSeek Harness（DSH）是一个以 Profile 为中心、通过 Cordis patch �
 - **清单**：读取 Profile bundles，区分官方 / 社区 / 未知来源，区分 installed / enabled 状态
 - **冲突引擎**（7 类）：显式声明、重复 Service Provider、路由、命令、端口、重复插件 ID、缺失依赖、Node 版本不兼容
 - **事务**：toggle / install / uninstall 全程快照 → 校验 → 失败回滚，不靠正则匹配 YAML
-- **smoke check**：`node --check` 验证入口文件语法，作为 `verified` 状态证据
+- **分层验证**：syntax（`node --check`）→ config（`dump-config`）→ loader（真实 dsh 启动），三层逐级加深
 - **任务持久化**：job 状态落盘 `jobs.json`，进程重启后前端轮询不再 404
 - **发现市场**：离线快照 + 手动录入 + 一键安装事务
 
@@ -33,11 +33,11 @@ DeepSeek Harness（DSH）是一个以 Profile 为中心、通过 Cordis patch �
 
 ```
 dsh-plugin-manager/
-├── manager.js              # 核心管理器：清单、冲突、事务、smoke check、HTTP API
+├── manager.js              # 核心管理器：清单、冲突、事务、分层验证、HTTP API
 ├── client/
 │   └── client.js           # 设置页 UI：tab 布局、冲突确认、异步进度、响应式
 ├── cordis.patch.yml        # 本插件的 patch 声明
-├── test.mjs                # 22 个单元测试
+├── test.mjs                # 25 个测试（单元 + 分层验证 + E2E）
 ├── tests/render/           # 渲染数据测试与夹具
 ├── docs/
 │   └── PLUGIN-MANAGER-PRD.md   # 产品需求文档（7 态模型、冲突引擎、事务流程）
@@ -113,8 +113,8 @@ discovered → installed → enabled → active → verified
 - **discovered**：已发现（在市场或 node_modules 中）
 - **installed**：依赖已安装到 node_modules
 - **enabled**：已加入 Profile bundles 且未被 patch 禁用
-- **active**：Loader 已成功激活（本版本以 smoke check 为证据基础）
-- **verified**：通过指定等级的真实验证（`node --check` 语法校验）
+- **active**：Loader 已成功激活（本版本以 `verifyProfile` 的 loader 层为证据基础）
+- **verified**：通过分层验证（syntax → config → loader）
 - **failed**：安装、配置或启动失败
 - **quarantined**：存在风险或冲突，被隔离
 
@@ -142,7 +142,7 @@ discovered → installed → enabled → active → verified
 
 ```
 读取状态 → 生成计划 → 展示影响 → 创建快照 → 修改 Profile
-→ dump-config 校验 → smoke check → 成功提交 / 失败回滚
+→ dump-config 校验 → 分层验证 → 成功提交 / 失败回滚
 ```
 
 没有完整事务结果不得显示"成功"。
@@ -168,7 +168,7 @@ DSH 生态中已有若干围绕"配置 / 快照 / 回滚 / 插件管理"的社�
 
 | 项目 | 定位 | 与本插件的关系 |
 |---|---|---|
-| [DSH Plugin Guard](https://github.com/lxzy-7/dsh-plugin-guard) | 快照插件/profile 变更、保护启动、回滚失败安装 | **功能高度重叠**：同样做快照与回滚。本插件额外提供 7 类冲突引擎、发现市场、任务持久化、smoke check，但 Plugin Guard 更轻量 |
+| [DSH Plugin Guard](https://github.com/lxzy-7/dsh-plugin-guard) | 快照插件/profile 变更、保护启动、回滚失败安装 | **功能高度重叠**：同样做快照与回滚。本插件额外提供 7 类冲突引擎、发现市场、任务持久化、分层验证，但 Plugin Guard 更轻量 |
 | [DSH Undo Savepoint](https://github.com/lire1131/dsh-undo-savepoint) | 崩溃恢复，快照配置与插件代码支持 undo/redo/rollback | 侧重**崩溃恢复**，本插件侧重**事务控制面**（实时 toggle/install 事务） |
 | [DSH Config Manager](https://github.com/xiajiajun516/dsh-config-manager) | 备份/恢复/迁移/同步 DSH 设置、插件、MCP、skills、工作区 | 侧重**配置迁移**，本插件侧重**生命周期事务** |
 | [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) | 社区插件目录（13k+ stars，659+ 插件） | 目录项目（静态列表），本插件是运行时管理器；本插件的发现市场可导入其离线快照 |
@@ -217,10 +217,11 @@ plugin-manager-ui      列表、详情、计划、冲突、进度、结果
 
 ## 测试
 
-22 个测试覆盖：
+25 个测试覆盖：
 
 - 17 个原有测试：清单读取、状态判断、冲突检测、事务回滚、monorepo 降级、市场归一化
-- 5 个新增测试：重复插件 ID、缺失依赖、版本不兼容、job 持久化恢复、smoke check
+- 5 个功能测试：重复插件 ID、缺失依赖、版本不兼容、job 持久化恢复、smoke check
+- 3 个新增测试：verifyProfile 语法层捕获错误、verifyProfile 合法插件通过、E2E 真实 pnpm install/uninstall
 
 ```bash
 node --test test.mjs

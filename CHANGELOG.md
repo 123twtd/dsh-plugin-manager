@@ -2,6 +2,20 @@
 
 本格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.1] - 2026-08-29
+
+### 新增
+
+- **分层验证 `verifyProfile`**：升级 smoke check 为三层验证——syntax（`node --check`）→ config（`dump-config`）→ loader（真实 dsh 进程启动，等待 ready 信号或超时崩溃检测）。dsh 不可用时降级到 syntax 层，`degraded` 字段如实标注
+- **`loaderSmokeTest`**：启动真实 dsh 进程，等待 stderr 输出 ready/listening 信号，超时 15s 或异常退出即视为 Loader 启动失败
+- **E2E 测试夹具**：用临时 Profile 跑真实 pnpm install/uninstall 并断言最终态（pnpm 不可用时自动跳过）
+- **3 个新测试**：verifyProfile 语法层捕获错误、verifyProfile 合法插件通过、E2E 真实 pnpm install/uninstall
+
+### 变更
+
+- toggle / install / uninstall 的 `verification` 字段从 `smokeCheck` 升级为 `verifyProfile`，新增 `level` 字段（syntax/config/loader）
+- `smokeCheck` 保留为兼容旧调用方的语法层子集
+
 ## [0.1.0] - 2026-08-29
 
 ### 新增
