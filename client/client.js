@@ -155,6 +155,11 @@ window.__ModuleLoader__.load({
           setNotice({ kind:'info', text:`已${pinned ? '置顶' : '取消置顶'} ${entry.packageName}。置顶项会单独排在最前面并高亮，禁用或卸载前需要先取消置顶。` });
         } catch (error) { setNotice({ kind:'error', text:`置顶失败：${error instanceof Error ? error.message : String(error)}` }); }
       }, [reload]);
+      const doRestart = React.useCallback(async () => {
+        try { const body = await fetch('/dsh-plugin-manager/restart', { method:'POST' }).then(readBody); setRestartPrompt(null); setNotice({ kind: body.restarted ? 'ok' : 'info', text: body.restarted ? '已触发 Harness 重启，页面会自动重连。' : (body.hint || '自动重启不可用，请手动重启 Harness。') }); }
+        catch (error) { setNotice({ kind:'error', text:`重启请求失败：${error instanceof Error ? error.message : String(error)}` }); }
+      }, []);
+      const dismissRestart = React.useCallback(() => setRestartPrompt(null), []);
       const runTask = React.useCallback(async (kind, startUrl, label) => {
         setNotice(null);
         setNow(Date.now());
@@ -206,11 +211,6 @@ window.__ModuleLoader__.load({
       const requestUpdate = React.useCallback(async (entry) => {
         await runTask('update', `/dsh-plugin-manager/update?package=${encodeURIComponent(entry.packageName)}`, entry.packageName);
       }, [runTask]);
-      const doRestart = React.useCallback(async () => {
-        try { const body = await fetch('/dsh-plugin-manager/restart', { method:'POST' }).then(readBody); setRestartPrompt(null); setNotice({ kind: body.restarted ? 'ok' : 'info', text: body.restarted ? '已触发 Harness 重启，页面会自动重连。' : (body.hint || '自动重启不可用，请手动重启 Harness。') }); }
-        catch (error) { setNotice({ kind:'error', text:`重启请求失败：${error instanceof Error ? error.message : String(error)}` }); }
-      }, []);
-      const dismissRestart = React.useCallback(() => setRestartPrompt(null), []);
       const install = React.useCallback(async (candidate) => {
         await runTask('install', `/dsh-plugin-manager/install?spec=${encodeURIComponent(candidate.spec)}`, candidate.repoName);
       }, [runTask]);
