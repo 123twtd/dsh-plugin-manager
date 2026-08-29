@@ -489,7 +489,7 @@ test('checkUpdate returns error for missing version', async () => {
     await writeFile(join(dir, 'cordis.patch.yml'), '[]\n');
     const result = await checkUpdate('test-profile', 'no-version-plugin');
     assert.equal(result.hasUpdate, false, '无版本号时 hasUpdate 应为 false');
-    assert.ok(result.error, '应返回 error 说明原因');
+    assert.ok(result.note || result.error, '应返回 note 或 error 说明原因');
   } finally { delete process.env.DSH_HOME; await rm(home, { recursive: true, force: true }); }
 });
 

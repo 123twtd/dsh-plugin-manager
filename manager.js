@@ -664,18 +664,41 @@ export async function installPlugin(profile, spec, { onStep } = {}) {
 // 检查更新：联网查询已装插件是否有新版本。
 // npm 包走 registry.npmjs.org 的 dist-tags/latest；github 包走 GitHub API 的 latest release 或最新 tag。
 // 离线/网络异常时返回 hasUpdate: false, error，不抛错，让前端能展示降级提示。
+// checkUpdate 简易缓存：避免短时间内重复触发 GitHub API 限流。
+// key: `${packageName}@${current}`，value: { result, expiresAt }
+const _updateCache = new Map();
+const CACHE_TTL_MS = 15 * 60 * 1000; // 15 分钟
+function cacheGet(key) {
+  const hit = _updateCache.get(key);
+  if (!hit) return null;
+  if (hit.expiresAt < Date.now()) { _updateCache.delete(key); return null; }
+  return hit.result;
+}
+function cacheSet(key, result) {
+  // 限流 error 缓存 5 分钟（GitHub rate limit 通常 60 分钟重置，5 分钟是安全值）
+  // 其他 error 不缓存（网络波动、临时 500 等，用户再点可能就好了）
+  // 成功结果缓存 15 分钟
+  const isRateLimit = result.error?.includes('限流');
+  const ttl = isRateLimit ? 5 * 60 * 1000 : result.error ? 0 : CACHE_TTL_MS;
+  if (ttl <= 0) return;
+  _updateCache.set(key, { result, expiresAt: Date.now() + ttl });
+}
+
 export async function checkUpdate(profile, packageName) {
   const dir = profileDir(profile);
   const target = (await inspectProfile(dir)).entries.find((entry) => entry.packageName === packageName);
   if (!target) throw new Error(`${packageName} 不在当前 Profile 的 bundles 里。`);
-  const current = target.version;
-  if (!current) return { packageName, hasUpdate: false, current: null, latest: null, source: target.specifier, error: '当前未记录版本号，无法比较。' };
-  // 只有官方核心组件（@deepseek-ai/*）不走联网查询——它们由 dsh 自身的升级流程管理。
-  // 本地自建包（source: local）如果发布到了 GitHub/npm，仍然可以查更新（plugin-manager 就是典型例子）。
+  // skip 判断放在最前面——官方组件 version 可能是 null，但这不影响跳过决定
   if (target.source === 'official') {
-    return { packageName, hasUpdate: false, current, latest: null, source: target.specifier, skipped: true, reason: '官方核心组件由 dsh 自身升级流程管理' };
+    return { packageName, hasUpdate: false, current: target.version ?? null, latest: null, source: target.specifier, skipped: true, reason: '官方核心组件由 dsh 自身升级流程管理' };
   }
+  const current = target.version;
+  if (!current) return { packageName, hasUpdate: false, current: null, latest: null, source: target.specifier, note: '无法检查更新：未记录版本号' };
+  const cacheKey = `${packageName}@${current}`;
+  const cached = cacheGet(cacheKey);
+  if (cached) return cached;
   const spec = target.specifier ?? '';
+  const wrap = (result) => { cacheSet(cacheKey, result); return result; };
   // npm 源：查询 registry 的 dist-tags
   if (!spec.startsWith('github:')) {
     try {
@@ -683,23 +706,24 @@ export async function checkUpdate(profile, packageName) {
       if (res.ok) {
         const data = await res.json();
         const latest = data.version;
-        return { packageName, hasUpdate: hasNewerVersion(current, latest), current, latest, source: spec };
+        return wrap({ packageName, hasUpdate: hasNewerVersion(current, latest), current, latest, source: spec });
       }
       // registry 查不到（404）：可能是本地自建包，尝试从 package.json 的 repository 字段提取 GitHub 仓库
       if (res.status === 404) {
         const repo = await githubRepoFromEntry(target);
-        if (repo) return await githubLatest(packageName, current, spec, repo);
-        return { packageName, hasUpdate: false, current, latest: null, source: spec, note: '无法检查更新：registry 无此包，且未找到 GitHub 仓库' };
+        if (repo) { const r = await githubLatest(packageName, current, spec, repo); return wrap(r); }
+        return wrap({ packageName, hasUpdate: false, current, latest: null, source: spec, note: '无法检查更新：registry 无此包，且未找到 GitHub 仓库' });
       }
-      return { packageName, hasUpdate: false, current, latest: null, source: spec, note: `无法检查更新：registry 返回 ${res.status}` };
+      return wrap({ packageName, hasUpdate: false, current, latest: null, source: spec, note: `无法检查更新：registry 返回 ${res.status}` });
     } catch (error) {
-      return { packageName, hasUpdate: false, current, latest: null, source: spec, error: `网络异常：${error instanceof Error ? error.message : String(error)}` };
+      return wrap({ packageName, hasUpdate: false, current, latest: null, source: spec, error: `网络异常：${error instanceof Error ? error.message : String(error)}` });
     }
   }
   // github 源：查 latest release，没有 release 则查最新 tag
   const repo = githubRepoFromSpecifier(spec);
-  if (!repo) return { packageName, hasUpdate: false, current, latest: null, source: spec, note: '无法检查更新：无法解析 GitHub 仓库地址' };
-  return await githubLatest(packageName, current, spec, repo);
+  if (!repo) return wrap({ packageName, hasUpdate: false, current, latest: null, source: spec, note: '无法检查更新：无法解析 GitHub 仓库地址' });
+  const result = await githubLatest(packageName, current, spec, repo);
+  return wrap(result);
 }
 
 // 更新事务：快照 → pnpm update → dump-config 校验 → 分层验证 → 失败回滚。
