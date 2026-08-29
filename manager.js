@@ -69,17 +69,31 @@ function hasNewerVersion(current, latest) {
   return Boolean(latest) && semverCompare(latest, current) > 0;
 }
 // GitHub API 查询最新 release / tag 的统一逻辑。
+// 带状态码检查的 GitHub API 请求：{ data, status, error }
+async function githubGet(url) {
+  const headers = { 'Accept': 'application/vnd.github+json', 'User-Agent': 'dsh-plugin-manager' };
+  let res;
+  try { res = await fetch(url, { headers }); } catch (e) { return { data: null, status: 0, error: e.message }; }
+  if (res.status === 403 && (res.headers.get('x-ratelimit-remaining') === '0' || (await res.clone().json().catch(() => ({}))).message?.includes('rate limit'))) {
+    return { data: null, status: 403, error: 'GitHub API 限流，请稍后再试' };
+  }
+  if (res.status === 404) return { data: null, status: 404, error: null };
+  if (!res.ok) return { data: null, status: res.status, error: `HTTP ${res.status}` };
+  const data = await res.json().catch(() => null);
+  return { data, status: res.status, error: null };
+}
 async function githubLatest(packageName, current, source, repo) {
   try {
-    const headers = { 'Accept': 'application/vnd.github+json', 'User-Agent': 'dsh-plugin-manager' };
-    const release = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, { headers }).then((r) => r.ok ? r.json() : null).catch(() => null);
-    if (release?.tag_name) {
-      const latest = release.tag_name.replace(/^v/, '');
+    const releaseRes = await githubGet(`https://api.github.com/repos/${repo}/releases/latest`);
+    if (releaseRes.error && releaseRes.status !== 404) return { packageName, hasUpdate: false, current, latest: null, source, repo, error: releaseRes.error };
+    if (releaseRes.data?.tag_name) {
+      const latest = releaseRes.data.tag_name.replace(/^v/, '');
       return { packageName, hasUpdate: hasNewerVersion(current, latest), current, latest, source, repo };
     }
-    const tags = await fetch(`https://api.github.com/repos/${repo}/tags`, { headers }).then((r) => r.ok ? r.json() : null).catch(() => null);
-    const latestTag = Array.isArray(tags) && tags[0]?.name ? tags[0].name.replace(/^v/, '') : null;
-    if (!latestTag) return { packageName, hasUpdate: false, current, latest: null, source, repo, error: '仓库无 release 也无 tag' };
+    const tagsRes = await githubGet(`https://api.github.com/repos/${repo}/tags`);
+    if (tagsRes.error) return { packageName, hasUpdate: false, current, latest: null, source, repo, error: tagsRes.error };
+    const latestTag = Array.isArray(tagsRes.data) && tagsRes.data[0]?.name ? tagsRes.data[0].name.replace(/^v/, '') : null;
+    if (!latestTag) return { packageName, hasUpdate: false, current, latest: null, source, repo, note: '仓库未发布版本（无 release 也无 tag）' };
     return { packageName, hasUpdate: hasNewerVersion(current, latestTag), current, latest: latestTag, source, repo, note: '仓库无 release，取最新 tag' };
   } catch (error) {
     return { packageName, hasUpdate: false, current, latest: null, source, repo, error: `GitHub API 异常：${error instanceof Error ? error.message : String(error)}` };
@@ -675,16 +689,16 @@ export async function checkUpdate(profile, packageName) {
       if (res.status === 404) {
         const repo = await githubRepoFromEntry(target);
         if (repo) return await githubLatest(packageName, current, spec, repo);
-        return { packageName, hasUpdate: false, current, latest: null, source: spec, error: `registry 无此包（${packageName} 可能是本地开发包），且未找到 GitHub 仓库` };
+        return { packageName, hasUpdate: false, current, latest: null, source: spec, note: '无法检查更新：registry 无此包，且未找到 GitHub 仓库' };
       }
-      return { packageName, hasUpdate: false, current, latest: null, source: spec, error: `registry 返回 ${res.status}` };
+      return { packageName, hasUpdate: false, current, latest: null, source: spec, note: `无法检查更新：registry 返回 ${res.status}` };
     } catch (error) {
       return { packageName, hasUpdate: false, current, latest: null, source: spec, error: `网络异常：${error instanceof Error ? error.message : String(error)}` };
     }
   }
   // github 源：查 latest release，没有 release 则查最新 tag
   const repo = githubRepoFromSpecifier(spec);
-  if (!repo) return { packageName, hasUpdate: false, current, latest: null, source: spec, error: '无法解析 GitHub 仓库地址。' };
+  if (!repo) return { packageName, hasUpdate: false, current, latest: null, source: spec, note: '无法检查更新：无法解析 GitHub 仓库地址' };
   return await githubLatest(packageName, current, spec, repo);
 }
 
