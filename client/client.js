@@ -38,7 +38,7 @@ window.__ModuleLoader__.load({
       .dshpm-row.pinned{background:color-mix(in srgb,var(--dsw-alias-brand-primary) 10%,var(--dsw-alias-bg-layer-2));box-shadow:inset 3px 0 0 var(--dsw-alias-brand-primary)}
       .dshpm-row.pinned-sep{border-top:2px dashed color-mix(in srgb,var(--dsw-alias-brand-primary) 35%,transparent)}
       .dshpm-name{font-size:13px;font-weight:600}.dshpm-version{margin-left:6px;color:var(--dsw-alias-label-tertiary);font-size:11px;font-weight:400}.dshpm-meta{color:var(--dsw-alias-label-secondary);font-size:12px}
-      .dshpm-state{font-size:12px;font-weight:600}.dshpm-state.on{color:#258a49}.dshpm-state.off{color:var(--dsw-alias-label-tertiary)}.dshpm-protected{font-size:12px;color:var(--dsw-alias-brand-primary);font-weight:600;white-space:nowrap}
+      .dshpm-state{font-size:12px;font-weight:600}.dshpm-state.on{color:#258a49}.dshpm-state.off{color:var(--dsw-alias-label-tertiary)}.dshpm-protected{font-size:12px;color:var(--dsw-alias-brand-primary);font-weight:600;white-space:nowrap}.dshpm-protected{font-size:12px;color:var(--dsw-alias-brand-primary);font-weight:600;white-space:nowrap}.dshpm-alias{margin-left:6px;font-size:11px;font-weight:400;color:var(--dsw-alias-brand-primary);background:color-mix(in srgb,var(--dsw-alias-brand-primary) 10%,transparent);padding:1px 6px;border-radius:4px;white-space:nowrap}.dshpm-alias-name{font-size:13px;font-weight:600;color:var(--dsw-alias-brand-primary)}.dshpm-alias-orig{font-size:11px;font-weight:400;color:var(--dsw-alias-label-tertiary);margin-left:4px}
       .dshpm-actions{display:flex;justify-content:flex-end;gap:5px;flex-wrap:nowrap;align-items:center}
       .dshpm-actions .dshpm-icon{width:26px;height:26px;flex:none}
       .dshpm-action-label{display:none}
@@ -268,19 +268,22 @@ window.__ModuleLoader__.load({
         const repoUrl = githubUrlFor(entry);
         const baseClass = protectedEntry ? 'dshpm-row manager' : entry.pinned ? 'dshpm-row pinned' : 'dshpm-row';
         return jsxs('div', { className:baseClass, onDoubleClick: () => setDetail(entry), title:'双击查看详情', children:[
-          jsxs('div', { className:'dshpm-name', style:cell, children:[entry.packageName, entry.version ? jsx('span', { className:'dshpm-version', children:`v${entry.version}` }) : null, updateInfo[entry.packageName] && !updateInfo[entry.packageName].loading ? (updateInfo[entry.packageName].skipped ? jsx('span', { className:'dshpm-version', style:{ opacity:.6 }, title:updateInfo[entry.packageName].reason || '跳过检查', children:'跳过' }) : updateInfo[entry.packageName].hasUpdate ? jsx('span', { className:'dshpm-version', style:{ color:'#2563eb' }, title:`最新 v${updateInfo[entry.packageName].latest}`, children:`→ v${updateInfo[entry.packageName].latest}` }) : updateInfo[entry.packageName].error ? jsx('span', { className:'dshpm-version', style:{ opacity:.6 }, title:updateInfo[entry.packageName].error, children:'检查失败' }) : updateInfo[entry.packageName].note ? jsx('span', { className:'dshpm-version', style:{ opacity:.5 }, title:updateInfo[entry.packageName].note, children:'无版本' }) : jsx('span', { className:'dshpm-version', style:{ opacity:.6 }, children:'已是最新' })) : null] }),
+          jsxs('div', { className:'dshpm-name', style:cell, children:[entry.alias ? jsxs(React.Fragment, { children:[jsx('span', { className:'dshpm-alias-name', children: entry.alias }), jsx('span', { className:'dshpm-alias-orig', children: entry.packageName })] }) : entry.packageName, entry.version ? jsx('span', { className:'dshpm-version', children:`v${entry.version}` }) : null, updateInfo[entry.packageName] && !updateInfo[entry.packageName].loading ? (updateInfo[entry.packageName].skipped ? jsx('span', { className:'dshpm-version', style:{ opacity:.6 }, title:updateInfo[entry.packageName].reason || '跳过检查', children:'跳过' }) : updateInfo[entry.packageName].hasUpdate ? jsx('span', { className:'dshpm-version', style:{ color:'#2563eb' }, title:`最新 v${updateInfo[entry.packageName].latest}`, children:`→ v${updateInfo[entry.packageName].latest}` }) : updateInfo[entry.packageName].error ? jsx('span', { className:'dshpm-version', style:{ opacity:.6 }, title:updateInfo[entry.packageName].error, children:'检查失败' }) : updateInfo[entry.packageName].note ? jsx('span', { className:'dshpm-version', style:{ opacity:.5 }, title:updateInfo[entry.packageName].note, children:'无版本' }) : jsx('span', { className:'dshpm-version', style:{ opacity:.6 }, children:'已是最新' })) : null] }),
           jsx('span', { className:'dshpm-meta dshpm-category', style:cell, children:categoryLabel[entry.category] ?? entry.category }), jsx('span', { className:'dshpm-meta dshpm-source', style:cell, title:entry.sourceLabel, children:entry.sourceLabel }),
           jsx('span', { className:`dshpm-state ${entry.enabled ? 'on' : 'off'}`, style:cell, children:entry.enabled ? '已启用' : '未启用' }),
           jsxs('div', { className:'dshpm-actions', children:[
             protectedEntry || entry.protected
               ? jsxs(React.Fragment, { children:[
                   IconButton({ title:ACTION_COPY.detail, onClick:() => setDetail(entry), children: jsx('span', { children:'详' }) }),
+                  IconButton({ title: entry.alias ? '编辑备注名称（当前：' + entry.alias + '）' : '设置备注名称', onClick:() => setAlias(entry), children: jsx('span', { style:{ color:'#6366f1' }, children:'✎' }) }),
                   jsx('span', { className:'dshpm-protected', children:'受保护' }),
                   repoUrl ? IconButton({ title:repoTitle(entry), onClick:openExternal(repoUrl), children: jsx(ExternalIcon, {}) }) : null,
+                  IconButton({ title:entry.enabled ? `禁用 ${entry.packageName}` : `启用 ${entry.packageName}`, danger:!entry.enabled, onClick:() => requestToggle(entry), disabled:busy, children: busy ? jsx('span', { children:'…' }) : entry.enabled ? jsx('span', { style:{ color:'#b3352f' }, children:'停' }) : jsx('span', { style:{ color:'#258a49' }, children:'启' }) }),
                   entry.installed ? IconButton({ title: ACTION_COPY.checkUpdate, onClick: () => checkUpdate(entry), disabled: updateInfo[entry.packageName]?.loading, children: updateInfo[entry.packageName]?.loading ? jsx('span', { children:'…' }) : jsx('span', { style:{ color:'#2563eb' }, children:'检' }) }) : null
                 ] })
               : jsxs(React.Fragment, { children:[
                   IconButton({ title:ACTION_COPY.detail, onClick:() => setDetail(entry), children: jsx('span', { children:'详' }) }),
+                  IconButton({ title: entry.alias ? '编辑备注名称（当前：' + entry.alias + '）' : '设置备注名称', onClick:() => setAlias(entry), children: jsx('span', { style:{ color:'#6366f1' }, children:'✎' }) }),
                   repoUrl ? IconButton({ title:repoTitle(entry), onClick:openExternal(repoUrl), children: jsx(ExternalIcon, {}) }) : null,
                   IconButton({ title:entry.pinned ? '取消置顶，置顶的插件会被排到独立分区' : '置顶，会单独移到最上面的「已置顶」区', onClick:() => pin(entry, !entry.pinned), disabled:busy, children: entry.pinned ? jsx('span', { style:{ color:'var(--dsw-alias-brand-primary)', fontWeight:600 }, children:'★' }) : jsx('span', { children:'☆' }) }),
                   IconButton({ title:entry.enabled ? `禁用 ${entry.packageName}` : `启用 ${entry.packageName}`, danger:!entry.enabled, onClick:() => requestToggle(entry), disabled:busy, children: busy ? jsx('span', { children:'…' }) : entry.enabled ? jsx('span', { style:{ color:'#b3352f' }, children:'停' }) : jsx('span', { style:{ color:'#258a49' }, children:'启' }) }),
@@ -480,4 +483,13 @@ window.__ModuleLoader__.load({
     function apply(ctx) { ctx.slots.inject('settings.section', () => ctx.slots.register({ name:'settings.section', id:'plugin-manager', order:16, label:() => '插件管理' }, PluginManagerSection)); }
     exports.inject = ['slots']; exports.apply = apply; return module.exports;
   }
-});
+});      const setAlias = React.useCallback(async (entry) => {
+        const current = entry.alias || '';
+        const next = window.prompt('为「' + entry.packageName + '」设置备注名称：\n（留空则还原为原名）', current);
+        if (next === null) return;
+        await fetch(`/dsh-plugin-manager/alias?package=${encodeURIComponent(entry.packageName)}&alias=${encodeURIComponent(next)}`, { method:'POST' }).then(readBody);
+        setNotice({ kind:'info', text: next.trim() ? '已为 ' + entry.packageName + ' 设置备注「' + next.trim() + '」' : '已还原 ' + entry.packageName + ' 的备注名称' });
+        setState(await fetch('/dsh-plugin-manager/inventory').then(readBody));
+      }, []);
+
+

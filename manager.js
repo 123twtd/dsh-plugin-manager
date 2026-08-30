@@ -171,6 +171,7 @@ async function entriesFor(dir) {
   const storedMarket = await readMarket(dir);
   const marketCategoryBySpec = new Map();
   for (const candidate of storedMarket.entries) if (candidate.spec) marketCategoryBySpec.set(normalizeSpec(candidate.spec), candidate.category);
+  const aliases = await readAliases(dir);
   const entries = [];
   for (const packageName of profile.dsh?.profile?.bundles ?? []) {
     const root = moduleDir(dir, packageName); const pkg = await json(join(root, 'package.json'), undefined); const market = await json(join(root, 'dsh-market.json'), {});
@@ -179,9 +180,10 @@ async function entriesFor(dir) {
     const ownDisabled = ids.length ? ids.filter((id) => disabled.has(id)) : disabled.has(packageName) ? [packageName] : [];
     const enabled = ids.length ? ownDisabled.length < ids.length : !disabled.has(packageName);
     const provenance = provenanceOf(packageName, pkg, profile.dependencies?.[packageName]);
+    if (market?.source === 'builtin') { provenance.source = 'builtin'; provenance.sourceLabel = '内置'; }
     const specifier = profile.dependencies?.[packageName] ?? null;
     const inheritedCategory = specifier ? marketCategoryBySpec.get(normalizeSpec(specifier)) : undefined;
-    entries.push({ packageName, specifier, version: pkg?.version, description: pkg?.description ?? '作者未提供插件介绍。', homepage: pkg?.homepage, repository: githubRepo(pkg?.repository), ...provenance, category: inheritedCategory || categoryOf(packageName, pkg, market), installed: Boolean(pkg) || provenance.source === 'official', enabled, protected: provenance.source === 'official' || packageName === managerPackageName, entryIds: ids, disabledIds: ownDisabled, services: market.services ?? {}, resources: market.resources ?? {}, declaredConflicts: market.conflicts ?? [], dshDependencies: market.dependencies ?? [], engines: pkg?.engines ?? {} });
+    entries.push({ packageName, specifier, version: pkg?.version, description: pkg?.description ?? '作者未提供插件介绍。', homepage: pkg?.homepage, repository: githubRepo(pkg?.repository), ...provenance, category: inheritedCategory || categoryOf(packageName, pkg, market), installed: Boolean(pkg) || provenance.source === 'official', enabled, protected: provenance.source === 'official' || packageName === managerPackageName || (market?.protected === true), entryIds: ids, disabledIds: ownDisabled, services: market.services ?? {}, resources: market.resources ?? {}, declaredConflicts: market.conflicts ?? [], dshDependencies: market.dependencies ?? [], engines: pkg?.engines ?? {}, alias: aliases[packageName] || '' });
   }
   return entries;
 }
@@ -408,6 +410,22 @@ export async function setPinned(dir, packageName, pinned) {
   return next;
 }
 
+// 备注名称：持久化在 aliases.json，与 pins.json 并列。
+const aliasesPath = (dir) => join(dir, '.dsh-plugin-manager', 'aliases.json');
+async function readAliases(dir) {
+  const stored = await json(aliasesPath(dir), {});
+  return (stored.aliases && typeof stored.aliases === 'object') ? stored.aliases : {};
+}
+export async function setAlias(dir, packageName, alias) {
+  const current = await readAliases(dir);
+  const trimmed = typeof alias === 'string' ? alias.trim() : '';
+  if (trimmed) current[packageName] = trimmed;
+  else delete current[packageName];
+  await mkdir(join(dir, '.dsh-plugin-manager'), { recursive: true });
+  await writeFile(aliasesPath(dir), `${JSON.stringify({ version: 1, aliases: current, updatedAt: new Date().toISOString() }, null, 2)}\n`, 'utf8');
+  return current;
+}
+
 async function readMarket(dir) {
   const stored = await json(marketPath(dir), {});
   return { version: marketVersion, updatedAt: stored.updatedAt ?? null, entries: Array.isArray(stored.entries) ? stored.entries : [] };
@@ -484,7 +502,7 @@ export async function inspectMarket(dir) {
     const expectedRepo = specRepo(candidate.spec);
     const actualRepo = candidate.owner && candidate.repoName ? `${candidate.owner}/${candidate.repoName}`.toLowerCase() : '';
     const inconsistent = Boolean(expectedRepo) && Boolean(actualRepo) && expectedRepo.toLowerCase() !== actualRepo;
-    return { ...candidate, installable: isInstallableSpec(candidate.spec), installed: Boolean(installed), bundled: Boolean(installed), packageName: installed?.packageName ?? null, enabled: installed ? installed.enabled : false, protected: Boolean(installed?.protected), inconsistent };
+    return { ...candidate, installable: isInstallableSpec(candidate.spec), installed: Boolean(installed), bundled: Boolean(installed), packageName: installed?.packageName ?? null, enabled: installed ? installed.enabled : false, protected: Boolean(installed?.protected) || Boolean(candidate.protected), inconsistent };
   });
   return { profileDir: dir, generatedAt: new Date().toISOString(), updatedAt: market.updatedAt, entries, importable: snapshot ? { available: true, name: snapshot.name, count: snapshot.count, updated: snapshot.updated, source: snapshot.source } : { available: false } };
 }
@@ -896,6 +914,7 @@ export function apply(ctx) { ctx.inject?.(['webServer'], ({ webServer }) => webS
   if (req.method === 'DELETE' && url.pathname === '/dsh-plugin-manager/market') { const spec = url.searchParams.get('spec'); if (!spec) return send(res, 400, { ok: false, error: '缺少 spec。' }); return send(res, 200, await removeMarketEntry(dir, spec)); }
   if (req.method === 'POST' && url.pathname === '/dsh-plugin-manager/market/add') { const spec = url.searchParams.get('spec'); if (!spec) return send(res, 400, { ok: false, error: '缺少 spec。' }); return send(res, 200, await addMarketEntry(dir, { spec, note: url.searchParams.get('note') ?? '', description: url.searchParams.get('description') ?? '', category: url.searchParams.get('category') ?? '' })); }
   if (req.method === 'POST' && url.pathname === '/dsh-plugin-manager/pin') { const pkg = url.searchParams.get('package'); if (!pkg) return send(res, 400, { ok: false, error: '缺少 package。' }); return send(res, 200, { ok: true, pinned: await setPinned(dir, pkg, url.searchParams.get('pinned') === 'true') }); }
+  if (req.method === 'POST' && url.pathname === '/dsh-plugin-manager/alias') { const pkg = url.searchParams.get('package'); if (!pkg) return send(res, 400, { ok: false, error: '缺少 package。' }); const alias = url.searchParams.get('alias') || ''; return send(res, 200, { ok: true, aliases: await setAlias(dir, pkg, alias) }); }
   if (req.method === 'POST' && url.pathname === '/dsh-plugin-manager/install') { const spec = url.searchParams.get('spec'); if (!spec) return send(res, 400, { ok: false, error: '缺少 spec。' }); const job = startInstall(profile, dir, spec); return send(res, 200, { ok: true, jobId: job.id }); }
   if (req.method === 'POST' && url.pathname === '/dsh-plugin-manager/uninstall') { const pkg = url.searchParams.get('package'); if (!pkg) return send(res, 400, { ok: false, error: '缺少 package。' }); if (url.searchParams.get('confirm') !== 'true') return send(res, 400, { ok: false, error: '卸载是破坏性操作，必须带 confirm=true。' }); const job = startUninstall(profile, dir, pkg, { unpin: url.searchParams.get('unpin') === 'true', confirm: true }); return send(res, 200, { ok: true, jobId: job.id }); }
   if (req.method === 'GET' && url.pathname === '/dsh-plugin-manager/check-update') { const pkg = url.searchParams.get('package'); if (!pkg) return send(res, 400, { ok: false, error: '缺少 package。' }); return send(res, 200, { ok: true, ...(await checkUpdate(profile, pkg)) }); }
