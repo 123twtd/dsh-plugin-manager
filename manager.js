@@ -954,7 +954,7 @@ export function apply(ctx) { ctx.inject?.(['webServer'], ({ webServer }) => webS
     try {
       const isWin = process.platform === 'win32';
       const child = isWin
-        ? spawn('powershell.exe', ['-NoProfile', '-Command', 'Start-Sleep -Seconds 2; Start-Process cmd.exe \"/c dsh web --no-open >nul 2>&1\" -WindowStyle Hidden'], { detached: true, stdio: 'ignore', windowsHide: true })
+        ? spawn('powershell.exe', ['-NoProfile', '-Command', 'Start-Sleep -Seconds 2; Start-Process cmd.exe \"/c timeout /t 4 >nul & dsh web --no-open >nul 2>&1 || timeout /t 6 >nul & dsh web --no-open >nul 2>&1\" -WindowStyle Hidden'], { detached: true, stdio: 'ignore', windowsHide: true })
         : spawn('sh', ['-c', 'sleep 2 && nohup dsh web --no-open >/dev/null 2>&1 &'], { detached: true, stdio: 'ignore', windowsHide: true });
       child.unref();
       ctx.logger?.warn?.('插件管理器：约 3 秒后重启 Harness（隐藏看门狗已拉起 dsh web --no-open）');
