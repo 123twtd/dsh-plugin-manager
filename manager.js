@@ -948,16 +948,22 @@ export function apply(ctx) { ctx.inject?.(['webServer'], ({ webServer }) => webS
   if (req.method === 'POST' && url.pathname === '/dsh-plugin-manager/uninstall') { const pkg = url.searchParams.get('package'); if (!pkg) return send(res, 400, { ok: false, error: '缺少 package。' }); if (url.searchParams.get('confirm') !== 'true') return send(res, 400, { ok: false, error: '卸载是破坏性操作，必须带 confirm=true。' }); const job = startUninstall(profile, dir, pkg, { unpin: url.searchParams.get('unpin') === 'true', confirm: true }); return send(res, 200, { ok: true, jobId: job.id }); }
   if (req.method === 'GET' && url.pathname === '/dsh-plugin-manager/check-update') { const pkg = url.searchParams.get('package'); if (!pkg) return send(res, 400, { ok: false, error: '缺少 package。' }); return send(res, 200, { ok: true, ...(await checkUpdate(profile, pkg)) }); }
   if (req.method === 'POST' && url.pathname === '/dsh-plugin-manager/update') { const pkg = url.searchParams.get('package'); if (!pkg) return send(res, 400, { ok: false, error: '缺少 package。' }); const job = startUpdate(profile, dir, pkg); return send(res, 200, { ok: true, jobId: job.id }); }
-  if (req.method === 'POST' && url.pathname === '/dsh-plugin-manager/restart') {
-    // 尝试触发 dsh 重启。dsh 可能支持 --restart 或通过信号；不支持的版本会返回 available: false。
-    // 保守策略：先尝试 spawn dsh --restart，成功则返回 ok，失败则降级为提示用户手动重启。
+    if (req.method === 'POST' && url.pathname === '/dsh-plugin-manager/restart') {
+    // 0.1.x 的 dsh CLI 没有 --restart 子命令（实测报 --profile required）。
+    // 采用分离式“延迟拉起”看门狗：先安排 2 秒后启动 dsh web 的分离进程，
+    // 再让当前进程退出——端口在新实例启动前已释放；令牌门户仅保护首页。
     try {
-      const bin = process.platform === 'win32' ? 'dsh.cmd' : 'dsh';
-      await exec(bin, ['--restart'], { timeout: 10_000, shell: process.platform === 'win32' }).catch(() => { throw new Error('dsh --restart 不可用'); });
+      const isWin = process.platform === 'win32';
+      const child = isWin
+        ? spawn('powershell.exe', ['-NoProfile', '-Command', 'Start-Sleep -Seconds 2; Start-Process -FilePath ' + q + 'cmd.exe' + q + ' -ArgumentList ' + q + '/c dsh web >nul 2>&1' + q + ' -WindowStyle Hidden'], { detached: true, stdio: 'ignore' })
+        : spawn('sh', ['-c', 'sleep 2 && nohup dsh web >/dev/null 2>&1 &'], { detached: true, stdio: 'ignore' });
+      child.unref();
+      ctx.logger?.warn?.('插件管理器：3 秒后重启 Harness（分离式看门狗已拉起 dsh web）');
+      setTimeout(() => process.exit(0), 500);
       return send(res, 200, { ok: true, restarted: true });
-    } catch (error) { return send(res, 200, { ok: true, restarted: false, available: false, hint: '当前 dsh 版本不支持自动重启，请手动重启 Harness。' }); }
+    } catch (error) { return send(res, 200, { ok: true, restarted: false, hint: '自动重启失败，请手动重启 Harness。' }); }
   }
-  if (req.method === 'GET' && url.pathname === '/dsh-plugin-manager/install' || req.method === 'GET' && url.pathname === '/dsh-plugin-manager/uninstall' || req.method === 'GET' && url.pathname === '/dsh-plugin-manager/update') { const job = await getJob(dir, url.searchParams.get('jobId')); if (!job) return send(res, 404, { ok: false, error: '任务不存在或已过期。' }); return send(res, 200, { ok: true, job }); }
+if (req.method === 'GET' && url.pathname === '/dsh-plugin-manager/install' || req.method === 'GET' && url.pathname === '/dsh-plugin-manager/uninstall' || req.method === 'GET' && url.pathname === '/dsh-plugin-manager/update') { const job = await getJob(dir, url.searchParams.get('jobId')); if (!job) return send(res, 404, { ok: false, error: '任务不存在或已过期。' }); return send(res, 200, { ok: true, job }); }
   return send(res, 404, { ok: false, error: '未知接口。' });
 } catch (error) { return send(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) }); } } })); }
 export default { name, inject, apply };
