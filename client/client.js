@@ -96,6 +96,8 @@ window.__ModuleLoader__.load({
       const [marketCategory, setMarketCategory] = React.useState('全部');
       const [marketStatus, setMarketStatus] = React.useState('全部');
       const [marketPage, setMarketPage] = React.useState(0);
+      const [marketSort, setMarketSort] = React.useState('default');
+      const [starInfo, setStarInfo] = React.useState({});
       const [marketDetail, setMarketDetail] = React.useState(null);
       const [manualSpec, setManualSpec] = React.useState('');
       const [manualNote, setManualNote] = React.useState('');
@@ -263,8 +265,33 @@ window.__ModuleLoader__.load({
           && (marketStatus === '全部' || (marketStatus === '已安装') === candidate.installed);
       };
       const marketFiltered = market.entries.filter(marketMatches);
-      const marketCategories = ['全部', ...Array.from(new Set(market.entries.map((entry) => entry.category))).sort()];
-      const marketTotalPages = Math.max(1, Math.ceil(marketFiltered.length / pageSize)); const marketCurrentPage = Math.min(marketPage, marketTotalPages - 1); const pagedMarket = marketFiltered.slice(marketCurrentPage * pageSize, (marketCurrentPage + 1) * pageSize);
+      const marketCategoryCounts = market.entries.reduce((acc, entry) => { acc[entry.category] = (acc[entry.category] || 0) + 1; return acc; }, {});
+      const marketCategories = ['全部', ...Object.keys(marketCategoryCounts).sort()];
+      const marketSorted = marketSort === 'stars' ? [...marketFiltered].sort((a, b) => (starInfo[(b.owner || '') + '/' + (b.repoName || '')]?.stars ?? -1) - (starInfo[(a.owner || '') + '/' + (a.repoName || '')]?.stars ?? -1)) : marketSort === 'listed' ? [...marketFiltered].sort((a, b) => String(b.listedAt || '').localeCompare(String(a.listedAt || ''))) : marketSort === 'name' ? [...marketFiltered].sort((a, b) => String(a.repoName).localeCompare(String(b.repoName))) : marketFiltered;
+      const marketTotalPages = Math.max(1, Math.ceil(marketSorted.length / pageSize)); const marketCurrentPage = Math.min(marketPage, marketTotalPages - 1); const pagedMarket = marketSorted.slice(marketCurrentPage * pageSize, (marketCurrentPage + 1) * pageSize);
+      const starReposKey = [...new Set(pagedMarket.map((c) => (c.owner || '') + '/' + (c.repoName || '')).filter((r) => r !== '/'))].slice(0, 40).join(',');
+      React.useEffect(() => {
+        if (tab !== 'market' || marketSort === 'stars' || !starReposKey) return undefined;
+        let cancelled = false;
+        fetch('/dsh-plugin-manager/market/stars?repos=' + encodeURIComponent(starReposKey)).then((r) => r.json()).then((body) => { if (!cancelled && body && body.ok && body.stars) setStarInfo((old) => ({ ...old, ...body.stars })); }).catch(() => {});
+        return () => { cancelled = true; };
+      }, [tab, marketSort, starReposKey]);
+      React.useEffect(() => {
+        if (tab !== 'market' || marketSort !== 'stars') return undefined;
+        let cancelled = false;
+        (async () => {
+          const repos = [...new Set(marketFiltered.map((c) => (c.owner || '') + '/' + (c.repoName || '')).filter((r) => r !== '/'))];
+          for (let i = 0; i < repos.length && !cancelled; i += 40) {
+            const chunk = repos.slice(i, i + 40).join(',');
+            try {
+              const body = await fetch('/dsh-plugin-manager/market/stars?repos=' + encodeURIComponent(chunk)).then((r) => r.json());
+              if (cancelled || !body || !body.ok || !body.stars) break;
+              setStarInfo((old) => ({ ...old, ...body.stars }));
+            } catch {}
+          }
+        })();
+        return () => { cancelled = true; };
+      }, [tab, marketSort, marketFiltered]);
       const busyTask = task?.job.state === 'running' ? task.label : null;
       const githubUrlFor = (entry) => entry?.repository ? `https://github.com/${entry.repository}` : entry?.homepage && /^https?:\/\//.test(entry.homepage) ? entry.homepage : '';
       const githubUrlForCandidate = (candidate) => candidate?.url || (candidate?.owner && candidate?.repoName ? `https://github.com/${candidate.owner}/${candidate.repoName}` : '');
@@ -311,7 +338,7 @@ window.__ModuleLoader__.load({
         return jsxs('div', { className:'dshpm-row', onDoubleClick: () => setMarketDetail(candidate), title:'双击查看候选详情', children:[
           jsxs('div', { className:'dshpm-name', style:cell, children:[candidate.repoName, candidate.packageName && candidate.packageName !== candidate.repoName ? jsx('span', { className:'dshpm-version', children:candidate.packageName }) : null] }),
           jsx('span', { className:'dshpm-meta dshpm-category', style:cell, children:categoryLabel[candidate.category] ?? candidate.category }),
-          jsx('span', { className:'dshpm-meta dshpm-source', style:cell, title:candidate.owner, children:candidate.owner }),
+          jsx('span', { className:'dshpm-meta dshpm-source', style:cell, title:candidate.owner, children:jsxs(React.Fragment, { children:[candidate.owner, (() => { const si = starInfo[(candidate.owner || '') + '/' + (candidate.repoName || '')]; return si ? jsxs('span', { style:{ display:'block', opacity:.85 }, children:['★ ' + si.stars + (si.pushedAt ? ' · ' + si.pushedAt : '')] }) : null; })()] }) }),
           jsx('span', { className:`dshpm-state ${stateClass}`, style:cell, children:state }),
           jsxs('div', { className:'dshpm-actions', children:[
             IconButton({ title:ACTION_COPY.detail, onClick:() => setMarketDetail(candidate), children: jsx('span', { children:'详' }) }),
@@ -407,9 +434,10 @@ window.__ModuleLoader__.load({
           jsxs('h3', { className:'dshpm-section-title', children:['发现市场 ', jsx('small', { children:'浏览候选，点「装」一键安装；清单只登记不下载。' }), market.importable.available ? jsx('small', { children:`内置清单 ${market.importable.count ?? 0} 条 · ${market.importable.updated ?? ''}` }) : null] }),
           jsxs('div', { className:'dshpm-tools', children:[
             jsx('input', { className:'dshpm-search', value:marketQuery, onChange:(event) => setMarketQuery(event.target.value), placeholder:'搜索候选名称、作者或介绍' }),
-            ['全部','未安装','已安装'].map((item) => jsx('button', { className:marketStatus === item ? 'dshpm-chip active' : 'dshpm-chip', type:'button', onClick:() => setMarketStatus(item), children:item }, item))
+            ['全部','未安装','已安装'].map((item) => jsx('button', { className:marketStatus === item ? 'dshpm-chip active' : 'dshpm-chip', type:'button', onClick:() => setMarketStatus(item), children:item }, item)),
+            jsx('select', { className:'dshpm-chip', style:{ width:'auto', cursor:'pointer' }, value:marketSort, onChange:(event) => { setMarketSort(event.target.value); setMarketPage(0); }, children:[['default', '排序：目录序'], ['stars', '排序：★ 最多'], ['listed', '排序：最新收录'], ['name', '排序：名称 A-Z']].map(([v, l]) => jsx('option', { value:v, children:l }, v)) })
           ] }),
-          jsx('div', { className:'dshpm-tools', children:marketCategories.map((item) => jsx('button', { className:marketCategory === item ? 'dshpm-chip active' : 'dshpm-chip', type:'button', onClick:() => setMarketCategory(item), children:categoryLabel[item] ?? item }, item)) }),
+          jsx('div', { className:'dshpm-tools', children:marketCategories.map((item) => jsx('button', { className:marketCategory === item ? 'dshpm-chip active' : 'dshpm-chip', type:'button', onClick:() => setMarketCategory(item), children:(categoryLabel[item] ?? item) + (item === '全部' ? '' : ' ' + (marketCategoryCounts[item] ?? 0)) }, item)) }),
           market.error ? jsx('p', { className:'dshpm-notice error', role:'alert', children:market.error }) : null,
           market.loading ? jsx('p', { className:'dshpm-sub', children:'正在读取发现市场…' }) : marketTable(pagedMarket),
           marketFiltered.length > pageSize ? jsxs('div', { className:'dshpm-pager', children:[jsx('button', { className:'dshpm-button', type:'button', disabled:marketCurrentPage === 0, onClick:() => setMarketPage(marketCurrentPage - 1), children:'上一页' }), jsx('span', { children:`${marketCurrentPage + 1} / ${marketTotalPages}` }), jsx('button', { className:'dshpm-button', type:'button', disabled:marketCurrentPage >= marketTotalPages - 1, onClick:() => setMarketPage(marketCurrentPage + 1), children:'下一页' })] }) : null,
