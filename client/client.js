@@ -211,6 +211,14 @@ window.__ModuleLoader__.load({
       const requestUpdate = React.useCallback(async (entry) => {
         await runTask('update', `/dsh-plugin-manager/update?package=${encodeURIComponent(entry.packageName)}`, entry.packageName);
       }, [runTask]);
+      const setAlias = React.useCallback(async (entry) => {
+        const current = entry.alias || '';
+        const next = window.prompt('为「' + entry.packageName + '」设置备注名称：\n（留空则还原为原名）', current);
+        if (next === null) return;
+        await fetch(`/dsh-plugin-manager/alias?package=${encodeURIComponent(entry.packageName)}&alias=${encodeURIComponent(next)}`, { method:'POST' }).then(readBody);
+        setNotice({ kind:'info', text: next.trim() ? '已为 ' + entry.packageName + ' 设置备注「' + next.trim() + '」' : '已还原 ' + entry.packageName + ' 的备注名称' });
+        setState(await fetch('/dsh-plugin-manager/inventory').then(readBody));
+      }, []);
       const install = React.useCallback(async (candidate) => {
         await runTask('install', `/dsh-plugin-manager/install?spec=${encodeURIComponent(candidate.spec)}`, candidate.repoName);
       }, [runTask]);
@@ -483,13 +491,6 @@ window.__ModuleLoader__.load({
     function apply(ctx) { ctx.slots.inject('settings.section', () => ctx.slots.register({ name:'settings.section', id:'plugin-manager', order:16, label:() => '插件管理' }, PluginManagerSection)); }
     exports.inject = ['slots']; exports.apply = apply; return module.exports;
   }
-});      const setAlias = React.useCallback(async (entry) => {
-        const current = entry.alias || '';
-        const next = window.prompt('为「' + entry.packageName + '」设置备注名称：\n（留空则还原为原名）', current);
-        if (next === null) return;
-        await fetch(`/dsh-plugin-manager/alias?package=${encodeURIComponent(entry.packageName)}&alias=${encodeURIComponent(next)}`, { method:'POST' }).then(readBody);
-        setNotice({ kind:'info', text: next.trim() ? '已为 ' + entry.packageName + ' 设置备注「' + next.trim() + '」' : '已还原 ' + entry.packageName + ' 的备注名称' });
-        setState(await fetch('/dsh-plugin-manager/inventory').then(readBody));
-      }, []);
+});
 
 
