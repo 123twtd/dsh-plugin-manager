@@ -949,16 +949,14 @@ export function apply(ctx) { ctx.inject?.(['webServer'], ({ webServer }) => webS
   if (req.method === 'GET' && url.pathname === '/dsh-plugin-manager/check-update') { const pkg = url.searchParams.get('package'); if (!pkg) return send(res, 400, { ok: false, error: '缺少 package。' }); return send(res, 200, { ok: true, ...(await checkUpdate(profile, pkg)) }); }
   if (req.method === 'POST' && url.pathname === '/dsh-plugin-manager/update') { const pkg = url.searchParams.get('package'); if (!pkg) return send(res, 400, { ok: false, error: '缺少 package。' }); const job = startUpdate(profile, dir, pkg); return send(res, 200, { ok: true, jobId: job.id }); }
   if (req.method === 'POST' && url.pathname === '/dsh-plugin-manager/restart') {
-    // 0.1.x 的 dsh CLI 没有 --restart 子命令。采用分离式看门狗：
-    // 隐藏窗口拉起 2 秒后启动 dsh web --no-open 的分离进程，再让当前进程退出。
+    // 0.1.x 的 dsh CLI 没有 --restart；分离子进程又会随宿主进程树被连带终止。
+    // 因此采用 WMI 创建独立进程（父进程为系统 WmiPrvSE，不受本进程退出影响）：
+    // 双层 EncodedCommand 避免引号问题；全程隐藏窗口；--no-open 不拉起浏览器。
     try {
-      const isWin = process.platform === 'win32';
-      const child = isWin
-        ? spawn('powershell.exe', ['-NoProfile', '-Command', 'Start-Sleep -Seconds 2; Start-Process cmd.exe \"/c timeout /t 4 >nul & dsh web --no-open >nul 2>&1 || timeout /t 6 >nul & dsh web --no-open >nul 2>&1\" -WindowStyle Hidden'], { detached: true, stdio: 'ignore', windowsHide: true })
-        : spawn('sh', ['-c', 'sleep 2 && nohup dsh web --no-open >/dev/null 2>&1 &'], { detached: true, stdio: 'ignore', windowsHide: true });
-      child.unref();
-      ctx.logger?.warn?.('插件管理器：约 3 秒后重启 Harness（隐藏看门狗已拉起 dsh web --no-open）');
-      setTimeout(() => process.exit(0), 500);
+      const psScript = "Start-Sleep -Seconds 2; Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = 'powershell.exe -NoProfile -WindowStyle Hidden -EncodedCommand UwB0AGEAcgB0AC0AUwBsAGUAZQBwACAALQBTAGUAYwBvAG4AZABzACAAMgA7ACAAUwB0AGEAcgB0AC0AUAByAG8AYwBlAHMAcwAgAGMAbQBkAC4AZQB4AGUAIAAtAEEAcgBnAHUAbQBlAG4AdABMAGkAcwB0ACAAJwAvAGMAIABkAHMAaAAgAHcAZQBiACAALQAtAG4AbwAtAG8AcABlAG4AIAA+AG4AdQBsACAAMgA+ACYAMQAnACAALQBXAGkAbgBkAG8AdwBTAHQAeQBsAGUAIABIAGkAZABkAGUAbgA=' } | Out-Null";
+      spawn('powershell.exe', ['-NoProfile', '-EncodedCommand', Buffer.from(psScript, 'utf16le').toString('base64')], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+      ctx.logger?.warn?.('插件管理器：WMI 看门狗已排程，6 秒后退出并由新实例接管');
+      setTimeout(() => process.exit(0), 6000);
       return send(res, 200, { ok: true, restarted: true });
     } catch (error) { return send(res, 200, { ok: true, restarted: false, hint: '自动重启失败：' + (error instanceof Error ? error.message : String(error)) + '，请手动重启 Harness。' }); }
   }
