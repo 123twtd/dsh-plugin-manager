@@ -955,8 +955,8 @@ export function apply(ctx) { ctx.inject?.(['webServer'], ({ webServer }) => webS
     try {
       const isWin = process.platform === 'win32';
       const child = isWin
-        ? spawn('powershell.exe', ['-NoProfile', '-Command', 'Start-Sleep -Seconds 2; Start-Process -FilePath ' + q + 'cmd.exe' + q + ' -ArgumentList ' + q + '/c dsh web >nul 2>&1' + q + ' -WindowStyle Hidden'], { detached: true, stdio: 'ignore' })
-        : spawn('sh', ['-c', 'sleep 2 && nohup dsh web >/dev/null 2>&1 &'], { detached: true, stdio: 'ignore' });
+        ? spawn('powershell.exe', ['-NoProfile', '-Command', 'Start-Sleep -Seconds 2; Start-Process -FilePath ' + q + 'cmd.exe' + q + ' -ArgumentList ' + q + '/c dsh web --no-open >nul 2>&1' + q + ' -WindowStyle Hidden'], { detached: true, stdio: 'ignore', windowsHide: true })
+        : spawn('sh', ['-c', 'sleep 2 && nohup dsh web --no-open >/dev/null 2>&1 &'], { detached: true, stdio: 'ignore', windowsHide: true });
       child.unref();
       ctx.logger?.warn?.('插件管理器：3 秒后重启 Harness（分离式看门狗已拉起 dsh web）');
       setTimeout(() => process.exit(0), 500);
