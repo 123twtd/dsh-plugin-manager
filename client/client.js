@@ -142,7 +142,9 @@ window.__ModuleLoader__.load({
           const automatic = (result.plan?.automaticActions ?? []).map((action) => action.packageName);
           const suffix = automatic.length ? `，并自动禁用 ${automatic.join('、')}` : '';
           const verifyNote = result.verification?.verified === false ? `（smoke check 发现 ${result.verification.issues.length} 个入口文件问题）` : '';
-          setNotice({ kind:'ok', text:`已${enabled ? '启用' : '禁用'} ${entry.packageName}${suffix}${verifyNote}。改动已写入 Profile 的 cordis.patch.yml，重启 Harness 后完全生效。` });
+          setNotice({ kind:'ok', text:`已${enabled ? '启用' : '禁用'} ${entry.packageName}${suffix}${verifyNote}，正在自动应用（宿主重启中，完成后自动回到本页）…` });
+          try { sessionStorage.setItem('dshpm-reopen', 'plugins'); } catch {}
+          doRestart();
         } catch (error) {
           setNotice({ kind:'error', text:`${enabled ? '启用' : '禁用'} ${entry.packageName} 失败：${error instanceof Error ? error.message : String(error)}` });
         } finally {
@@ -158,8 +160,19 @@ window.__ModuleLoader__.load({
         } catch (error) { setNotice({ kind:'error', text:`置顶失败：${error instanceof Error ? error.message : String(error)}` }); }
       }, [reload]);
       const doRestart = React.useCallback(async () => {
-        try { const body = await fetch('/dsh-plugin-manager/restart', { method:'POST' }).then(readBody); setRestartPrompt(null); setNotice({ kind: body.restarted ? 'ok' : 'info', text: body.restarted ? '已触发 Harness 重启，页面会自动重连。' : (body.hint || '自动重启不可用，请手动重启 Harness。') }); }
-        catch (error) { setNotice({ kind:'error', text:`重启请求失败：${error instanceof Error ? error.message : String(error)}` }); }
+        setRestartPrompt(null);
+        try {
+          const body = await fetch('/dsh-plugin-manager/restart', { method:'POST' }).then(readBody);
+          if (!body.restarted) { setNotice({ kind:'info', text: body.hint || '自动重启不可用，请手动重启 Harness 并刷新页面。' }); return; }
+          try { sessionStorage.setItem('dshpm-reopen', 'plugins'); } catch {}
+          setNotice({ kind:'ok', text:'已触发 Harness 重启，等待宿主上线后自动刷新页面…' });
+          const deadline = Date.now() + 90000;
+          while (Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+            try { const ping = await fetch('/dsh-plugin-manager/inventory', { cache:'no-store' }); if (ping.ok) { setNotice({ kind:'ok', text:'宿主已恢复，正在自动刷新页面…' }); setTimeout(() => location.reload(), 600); return; } } catch {}
+          }
+          setNotice({ kind:'error', text:'90 秒内宿主未恢复上线，请手动刷新页面。' });
+        } catch (error) { setNotice({ kind:'error', text:`重启请求失败：${error instanceof Error ? error.message : String(error)}` }); }
       }, []);
       const dismissRestart = React.useCallback(() => setRestartPrompt(null), []);
       const runTask = React.useCallback(async (kind, startUrl, label) => {
@@ -414,7 +427,7 @@ window.__ModuleLoader__.load({
         ] }),
         notice ? jsx('p', { className:`dshpm-notice ${notice.kind}`, role:'status', children:notice.text }) : null,
         restartPrompt ? jsxs('div', { className:`dshpm-restart-banner${restartPrompt.isManager ? ' danger' : ''}`, role:'status', children:[
-          jsxs('span', { children:[restartPrompt.isManager ? jsx('b', { children:'更新了插件管理器自身。' }) : null, restartPrompt.kind === 'install' ? '安装完成，' : restartPrompt.kind === 'update' ? '更新完成，' : '卸载完成，', '重启 Harness 后变更才完全生效。', restartPrompt.isManager ? ' 重启期间本设置页会短暂中断。' : ''] }),
+          jsxs('span', { children:[restartPrompt.isManager ? jsx('b', { children:'更新了插件管理器自身。' }) : null, restartPrompt.kind === 'install' ? '安装完成，' : restartPrompt.kind === 'update' ? '更新完成，' : restartPrompt.kind === 'toggle' ? (restartPrompt.enabled ? '启用完成，' : '停用完成，') : '卸载完成，', '重启 Harness 后变更才完全生效。', restartPrompt.isManager ? ' 重启期间本设置页会短暂中断。' : ''] }),
           jsxs('div', { className:'dshpm-restart-actions', children:[
             jsx('button', { className:'dshpm-button primary', type:'button', onClick:doRestart, children:'现在重启' }),
             jsx('button', { className:'dshpm-button', type:'button', onClick:() => { try { localStorage.setItem('dshpm-restart-pref', 'auto'); } catch {} dismissRestart(); }, children:'以后自动重启' }),
@@ -516,7 +529,24 @@ window.__ModuleLoader__.load({
         detail ? jsx('div', { className:'dshpm-modal-backdrop', role:'presentation', onMouseDown:() => setDetail(null), children:jsx('section', { className:'dshpm-modal', role:'dialog', 'aria-modal':'true', onMouseDown:(event) => event.stopPropagation(), children:jsxs(React.Fragment, { children:[jsxs('div', { className:'dshpm-modal-head', children:[jsx('h3', { children:detail.packageName }), jsx('button', { className:'dshpm-button dshpm-close', type:'button', onClick:() => setDetail(null), children:'×' })] }), jsx('p', { className:'dshpm-description', children:detail.description }), jsxs('dl', { className:'dshpm-detail-grid', children:[jsx('dt', { children:'用途' }), jsx('dd', { children:detail.category }), jsx('dt', { children:'来源' }), jsx('dd', { children:detail.sourceLabel }), jsx('dt', { children:'版本' }), jsx('dd', { children:detail.version ?? '未声明' }), jsx('dt', { children:'状态' }), jsx('dd', { children:detail.pinned ? '已置顶（禁用 / 卸载前需先取消置顶）' : detail.enabled ? '已启用' : '未启用' }), jsx('dt', { children:'仓库' }), jsx('dd', { children: detail.repository ? jsxs('a', { href:`https://github.com/${detail.repository}`, target:'_blank', rel:'noopener noreferrer', children:[`https://github.com/${detail.repository}`, ' ', jsx(ExternalIcon, {})] }) : (detail.homepage ?? '未声明') }), jsx('dt', { children:'冲突声明' }), jsx('dd', { children:detail.declaredConflicts.length ? detail.declaredConflicts.join('、') : '无' })] })] }) }) }) : null
       ] });
     }
-    function apply(ctx) { ctx.slots.inject('settings.section', () => ctx.slots.register({ name:'settings.section', id:'plugin-manager', order:16, label:() => '插件管理' }, PluginManagerSection)); }
+    function apply(ctx) {
+      // 静默重启后自动恢复到插件管理视图（轮询等待宿主 UI 渲染完成）
+      if (typeof sessionStorage !== 'undefined') {
+        let reopenFlag = null; try { reopenFlag = sessionStorage.getItem('dshpm-reopen'); if (reopenFlag) sessionStorage.removeItem('dshpm-reopen'); } catch {}
+        if (reopenFlag === 'plugins') {
+          let tries = 0;
+          const reopenTimer = setInterval(() => {
+            tries++;
+            const settingsBtn = [...document.querySelectorAll('button')].find((x) => x.textContent.trim() === '设置');
+            if (settingsBtn) {
+              clearInterval(reopenTimer);
+              settingsBtn.click();
+              setTimeout(() => { const nav = [...document.querySelectorAll('button')].find((x) => x.textContent.trim() === '插件管理'); nav?.click(); }, 400);
+            } else if (tries > 40) clearInterval(reopenTimer);
+          }, 250);
+        }
+      }
+      ctx.slots.inject('settings.section', () => ctx.slots.register({ name:'settings.section', id:'plugin-manager', order:16, label:() => '插件管理' }, PluginManagerSection)); }
     exports.inject = ['slots']; exports.apply = apply; return module.exports;
   }
 });
