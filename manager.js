@@ -1,6 +1,6 @@
 import { cp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { execFile, spawn } from 'node:child_process';
-import { basename, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { isMap, isScalar, isSeq, parseDocument } from 'yaml';
@@ -174,7 +174,7 @@ async function entriesFor(dir) {
   const aliases = await readAliases(dir);
   const entries = [];
   for (const packageName of profile.dsh?.profile?.bundles ?? []) {
-    const root = moduleDir(dir, packageName); const pkg = await json(join(root, 'package.json'), undefined); const market = await json(join(root, 'dsh-market.json'), {});
+    const root = moduleDir(dir, packageName); const pkg = packageName === managerPackageName ? await json(join(dirname(fileURLToPath(import.meta.url)), 'package.json'), undefined) : await json(join(root, 'package.json'), undefined); const market = await json(join(root, 'dsh-market.json'), {});
     const bundlePatch = pkg?.dsh?.bundle?.patch ? await readFile(join(root, pkg.dsh.bundle.patch), 'utf8').catch(() => '') : '';
     const ids = declaredIds(bundlePatch);
     const ownDisabled = ids.length ? ids.filter((id) => disabled.has(id)) : disabled.has(packageName) ? [packageName] : [];
@@ -904,12 +904,41 @@ export async function getJob(dir, id) {
 }
 
 function send(res, status, value) { const body = JSON.stringify(value); res.statusCode = status; res.setHeader('Content-Type', 'application/json; charset=utf-8'); res.end(body); }
+// ---- 市场星标批量查询：24h 磁盘缓存 + GitHub search API（每次最多 6 组、每组 10 个 repo）----
+const STARS_TTL_MS = 24 * 60 * 60 * 1000;
+const starsMemory = new Map();
+const marketStarsPath = (dir) => join(dir, '.dsh-plugin-manager', 'market-stars.json');
+async function readStarsCache(dir) { try { const parsed = JSON.parse(await readFile(marketStarsPath(dir), 'utf8')); return parsed && typeof parsed === 'object' ? parsed : {}; } catch { return {}; } }
+async function writeStarsCache(dir, cache) { await mkdir(dirname(marketStarsPath(dir)), { recursive: true }); await writeFile(marketStarsPath(dir), JSON.stringify(cache), 'utf8'); }
+async function marketStars(dir, repos) {
+  const cache = { ...(await readStarsCache(dir)) };
+  for (const [k, v] of starsMemory) { const c = cache[k]; if (!c || (v.fetchedAt ?? 0) > (c.fetchedAt ?? 0)) cache[k] = v; }
+  const now = Date.now();
+  const need = repos.filter((r) => { const c = cache[r.toLowerCase()]; return !c || now - (c.fetchedAt ?? 0) > STARS_TTL_MS; });
+  let fetched = 0;
+  for (let i = 0; i < need.length && i < 60; i += 10) {
+    const chunk = need.slice(i, i + 10);
+    const res = await githubGet('https://api.github.com/search/repositories?q=' + encodeURIComponent(chunk.map((r) => 'repo:' + r).join(' ')) + '&per_page=100');
+    if (res.status === 403 || !res.data?.items) break;
+    for (const item of res.data.items) {
+      const key = String(item.full_name || '').toLowerCase(); if (!key) continue;
+      const rec = { stars: item.stargazers_count ?? 0, pushedAt: String(item.pushed_at || '').slice(0, 10), fetchedAt: now };
+      cache[key] = rec; starsMemory.set(key, rec); fetched++;
+    }
+  }
+  await writeStarsCache(dir, cache).catch(() => {});
+  const out = {};
+  for (const r of repos) { const rec = cache[r.toLowerCase()]; if (rec) out[r] = { stars: rec.stars, pushedAt: rec.pushedAt }; }
+  return { stars: out, fetched };
+}
+
 export function apply(ctx) { ctx.inject?.(['webServer'], ({ webServer }) => webServer?.register({ kind: 'prefix', path: '/dsh-plugin-manager', handler: async (req, res) => { try {
   const url = new URL(req.url ?? '/', 'http://localhost'), profile = profileFromContext(ctx), dir = profileDir(profile);
   if (req.method === 'GET' && url.pathname === '/dsh-plugin-manager/inventory') return send(res, 200, { ok: true, ...(await inspectProfile(dir)) });
   if (req.method === 'GET' && url.pathname === '/dsh-plugin-manager/plan') { const pkg = url.searchParams.get('package'); if (!pkg) return send(res, 400, { ok: false, error: '缺少 package。' }); return send(res, 200, await planToggle(dir, pkg, url.searchParams.get('enabled') === 'true', { autoDisableLowRisk: url.searchParams.get('autoDisableLowRisk') === 'true' })); }
   if (req.method === 'POST' && url.pathname === '/dsh-plugin-manager/toggle') { const pkg = url.searchParams.get('package'); if (!pkg) return send(res, 400, { ok: false, error: '缺少 package。' }); return send(res, 200, await applyToggle(profile, pkg, url.searchParams.get('enabled') === 'true', { autoDisableLowRisk: url.searchParams.get('autoDisableLowRisk') === 'true', acceptConflicts: url.searchParams.get('acceptConflicts') === 'true' })); }
   if (req.method === 'GET' && url.pathname === '/dsh-plugin-manager/market') return send(res, 200, { ok: true, ...(await inspectMarket(dir)) });
+  if (req.method === 'GET' && url.pathname === '/dsh-plugin-manager/market/stars') { const repos = (url.searchParams.get('repos') || '').split(',').map((x) => x.trim()).filter(Boolean).slice(0, 40); if (!repos.length) return send(res, 400, { ok: false, error: '缺少 repos 参数（owner/repo 逗号分隔，最多 40 个）。' }); return send(res, 200, { ok: true, ...(await marketStars(dir, repos)) }); }
   if (req.method === 'POST' && url.pathname === '/dsh-plugin-manager/market/import') return send(res, 200, await importSnapshot(dir, { replace: url.searchParams.get('replace') === 'true' }));
   if (req.method === 'DELETE' && url.pathname === '/dsh-plugin-manager/market') { const spec = url.searchParams.get('spec'); if (!spec) return send(res, 400, { ok: false, error: '缺少 spec。' }); return send(res, 200, await removeMarketEntry(dir, spec)); }
   if (req.method === 'POST' && url.pathname === '/dsh-plugin-manager/market/add') { const spec = url.searchParams.get('spec'); if (!spec) return send(res, 400, { ok: false, error: '缺少 spec。' }); return send(res, 200, await addMarketEntry(dir, { spec, note: url.searchParams.get('note') ?? '', description: url.searchParams.get('description') ?? '', category: url.searchParams.get('category') ?? '' })); }
